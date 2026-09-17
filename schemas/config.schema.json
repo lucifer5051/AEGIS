@@ -1,0 +1,855 @@
+{
+  "$defs": {
+    "AutonomyConfig": {
+      "additionalProperties": false,
+      "description": "Operational autonomy policy (decoupled from deterministic risk boundaries).",
+      "properties": {
+        "autonomy_tier": {
+          "$ref": "#/$defs/AutonomyTier",
+          "default": 1,
+          "description": "Operational autonomy level (0=Strict Manual, 1=Safe Bounded, 2=Supervised, 3=Full Bounded)."
+        },
+        "allow_user_override": {
+          "default": true,
+          "description": "Whether user can temporarily elevate tier for a specific task.",
+          "title": "Allow User Override",
+          "type": "boolean"
+        }
+      },
+      "title": "AutonomyConfig",
+      "type": "object"
+    },
+    "AutonomyTier": {
+      "description": "Frozen operational autonomy tiers (0 to 3).",
+      "enum": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "title": "AutonomyTier",
+      "type": "integer"
+    },
+    "CPUProfile": {
+      "additionalProperties": false,
+      "description": "Detected CPU characteristics.",
+      "properties": {
+        "vendor": {
+          "default": "Unknown",
+          "title": "Vendor",
+          "type": "string"
+        },
+        "model": {
+          "default": "Unknown",
+          "title": "Model",
+          "type": "string"
+        },
+        "physical_cores": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Physical Cores",
+          "type": "integer"
+        },
+        "logical_processors": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Logical Processors",
+          "type": "integer"
+        },
+        "base_clock_mhz": {
+          "anyOf": [
+            {
+              "minimum": 100,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Clock Mhz"
+        },
+        "architecture": {
+          "default": "x86_64",
+          "title": "Architecture",
+          "type": "string"
+        }
+      },
+      "title": "CPUProfile",
+      "type": "object"
+    },
+    "ChannelConfig": {
+      "additionalProperties": false,
+      "description": "Channel interfaces and affinity rules.",
+      "properties": {
+        "desktop_enabled": {
+          "default": true,
+          "title": "Desktop Enabled",
+          "type": "boolean"
+        },
+        "whatsapp_enabled": {
+          "default": false,
+          "title": "Whatsapp Enabled",
+          "type": "boolean"
+        },
+        "channel_affinity_enforced": {
+          "default": true,
+          "description": "Ensures responses return exclusively to the originating channel.",
+          "title": "Channel Affinity Enforced",
+          "type": "boolean"
+        },
+        "allow_cross_channel_notifications": {
+          "default": false,
+          "description": "Cross-channel notifications permitted only through explicit user policy.",
+          "title": "Allow Cross Channel Notifications",
+          "type": "boolean"
+        },
+        "allowed_cross_channel_priorities": {
+          "description": "Priorities eligible for cross-channel routing when enabled.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Cross Channel Priorities",
+          "type": "array"
+        }
+      },
+      "title": "ChannelConfig",
+      "type": "object"
+    },
+    "DeveloperConfig": {
+      "additionalProperties": false,
+      "description": "Development and test overrides (strictly cannot bypass Trust Core).",
+      "properties": {
+        "debug_mode": {
+          "default": false,
+          "title": "Debug Mode",
+          "type": "boolean"
+        },
+        "verbose_diagnostics": {
+          "default": false,
+          "title": "Verbose Diagnostics",
+          "type": "boolean"
+        },
+        "test_mode": {
+          "default": false,
+          "title": "Test Mode",
+          "type": "boolean"
+        }
+      },
+      "title": "DeveloperConfig",
+      "type": "object"
+    },
+    "GPUProfile": {
+      "additionalProperties": false,
+      "description": "Detected GPU characteristics.",
+      "properties": {
+        "vendor": {
+          "default": "NVIDIA",
+          "title": "Vendor",
+          "type": "string"
+        },
+        "model": {
+          "default": "Unknown",
+          "title": "Model",
+          "type": "string"
+        },
+        "vram_bytes": {
+          "default": 6442450944,
+          "minimum": 0,
+          "title": "Vram Bytes",
+          "type": "integer"
+        },
+        "driver_version": {
+          "default": "Unknown",
+          "title": "Driver Version",
+          "type": "string"
+        },
+        "cuda_compute_capability": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cuda Compute Capability"
+        }
+      },
+      "title": "GPUProfile",
+      "type": "object"
+    },
+    "HardwareProfile": {
+      "additionalProperties": false,
+      "description": "Cached hardware profile data structure.",
+      "properties": {
+        "profile_id": {
+          "default": "default-profile",
+          "title": "Profile Id",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/HardwareProfileState",
+          "default": "REQUIRES_REBENCHMARK"
+        },
+        "cpu": {
+          "$ref": "#/$defs/CPUProfile"
+        },
+        "ram": {
+          "$ref": "#/$defs/RAMProfile"
+        },
+        "gpu": {
+          "$ref": "#/$defs/GPUProfile"
+        },
+        "storage": {
+          "items": {
+            "$ref": "#/$defs/StorageDriveProfile"
+          },
+          "title": "Storage",
+          "type": "array"
+        },
+        "os": {
+          "$ref": "#/$defs/OSProfile"
+        },
+        "runtimes": {
+          "$ref": "#/$defs/RuntimeProfile"
+        },
+        "benchmark_version": {
+          "default": "1.0",
+          "title": "Benchmark Version",
+          "type": "string"
+        },
+        "detection_version": {
+          "default": "1.0",
+          "title": "Detection Version",
+          "type": "string"
+        },
+        "invalidation_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Invalidation Reason"
+        },
+        "last_benchmarked_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Benchmarked At"
+        }
+      },
+      "title": "HardwareProfile",
+      "type": "object"
+    },
+    "HardwareProfileState": {
+      "description": "Operational lifecycle state of a hardware benchmark profile.",
+      "enum": [
+        "VALID",
+        "STALE",
+        "INVALID",
+        "REQUIRES_REBENCHMARK"
+      ],
+      "title": "HardwareProfileState",
+      "type": "string"
+    },
+    "LogLevel": {
+      "description": "Logging verbosity levels.",
+      "enum": [
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "CRITICAL"
+      ],
+      "title": "LogLevel",
+      "type": "string"
+    },
+    "LoggingConfig": {
+      "additionalProperties": false,
+      "description": "Logging, telemetry, and diagnostics policies.",
+      "properties": {
+        "log_level": {
+          "$ref": "#/$defs/LogLevel",
+          "default": "INFO"
+        },
+        "diagnostic_mode": {
+          "default": false,
+          "title": "Diagnostic Mode",
+          "type": "boolean"
+        },
+        "retention_days": {
+          "default": 30,
+          "maximum": 365,
+          "minimum": 1,
+          "title": "Retention Days",
+          "type": "integer"
+        },
+        "audit_logging_enabled": {
+          "default": true,
+          "title": "Audit Logging Enabled",
+          "type": "boolean"
+        },
+        "performance_telemetry_enabled": {
+          "default": false,
+          "title": "Performance Telemetry Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "LoggingConfig",
+      "type": "object"
+    },
+    "MemoryConfig": {
+      "additionalProperties": false,
+      "description": "Context budgets and memory retrieval limits.",
+      "properties": {
+        "max_working_context_tokens": {
+          "default": 8192,
+          "maximum": 128000,
+          "minimum": 1024,
+          "title": "Max Working Context Tokens",
+          "type": "integer"
+        },
+        "hot_memory_item_limit": {
+          "default": 100,
+          "maximum": 1000,
+          "minimum": 10,
+          "title": "Hot Memory Item Limit",
+          "type": "integer"
+        },
+        "project_memory_limit_items": {
+          "default": 5000,
+          "maximum": 100000,
+          "minimum": 100,
+          "title": "Project Memory Limit Items",
+          "type": "integer"
+        },
+        "retrieval_candidate_limit": {
+          "default": 50,
+          "maximum": 500,
+          "minimum": 5,
+          "title": "Retrieval Candidate Limit",
+          "type": "integer"
+        },
+        "context_ir_token_budget": {
+          "default": 4096,
+          "maximum": 32000,
+          "minimum": 512,
+          "title": "Context Ir Token Budget",
+          "type": "integer"
+        },
+        "retention_policy_days": {
+          "default": 365,
+          "maximum": 3650,
+          "minimum": 30,
+          "title": "Retention Policy Days",
+          "type": "integer"
+        }
+      },
+      "title": "MemoryConfig",
+      "type": "object"
+    },
+    "NetworkConfig": {
+      "additionalProperties": false,
+      "description": "Network egress policy boundaries.",
+      "properties": {
+        "network_mode": {
+          "$ref": "#/$defs/NetworkMode",
+          "default": "BALANCED",
+          "description": "Operating network boundary ('LOCAL_ONLY', 'PREFER_LOCAL', 'BALANCED', 'ONLINE_ALLOWED')."
+        },
+        "request_timeout_seconds": {
+          "default": 30,
+          "maximum": 300,
+          "minimum": 5,
+          "title": "Request Timeout Seconds",
+          "type": "integer"
+        },
+        "max_retries": {
+          "default": 3,
+          "maximum": 10,
+          "minimum": 0,
+          "title": "Max Retries",
+          "type": "integer"
+        }
+      },
+      "title": "NetworkConfig",
+      "type": "object"
+    },
+    "NetworkMode": {
+      "description": "Operational network policy boundary.",
+      "enum": [
+        "LOCAL_ONLY",
+        "PREFER_LOCAL",
+        "BALANCED",
+        "ONLINE_ALLOWED"
+      ],
+      "title": "NetworkMode",
+      "type": "string"
+    },
+    "NotificationConfig": {
+      "additionalProperties": false,
+      "description": "Alert routing, priority thresholds, and quiet hours.",
+      "properties": {
+        "quiet_hours_enabled": {
+          "default": false,
+          "title": "Quiet Hours Enabled",
+          "type": "boolean"
+        },
+        "quiet_hours_start_utc": {
+          "default": "22:00",
+          "title": "Quiet Hours Start Utc",
+          "type": "string"
+        },
+        "quiet_hours_end_utc": {
+          "default": "08:00",
+          "title": "Quiet Hours End Utc",
+          "type": "string"
+        },
+        "default_priority": {
+          "default": "P2",
+          "title": "Default Priority",
+          "type": "string"
+        },
+        "batching_enabled": {
+          "default": true,
+          "title": "Batching Enabled",
+          "type": "boolean"
+        },
+        "batch_interval_seconds": {
+          "default": 60,
+          "maximum": 3600,
+          "minimum": 5,
+          "title": "Batch Interval Seconds",
+          "type": "integer"
+        },
+        "deduplication_window_seconds": {
+          "default": 300,
+          "maximum": 86400,
+          "minimum": 10,
+          "title": "Deduplication Window Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "NotificationConfig",
+      "type": "object"
+    },
+    "OSProfile": {
+      "additionalProperties": false,
+      "description": "Operating system characteristics.",
+      "properties": {
+        "operating_system": {
+          "default": "Windows",
+          "title": "Operating System",
+          "type": "string"
+        },
+        "version": {
+          "default": "11",
+          "title": "Version",
+          "type": "string"
+        },
+        "build_number": {
+          "default": "26220",
+          "title": "Build Number",
+          "type": "string"
+        },
+        "architecture": {
+          "default": "64bit",
+          "title": "Architecture",
+          "type": "string"
+        }
+      },
+      "title": "OSProfile",
+      "type": "object"
+    },
+    "PathConfig": {
+      "additionalProperties": false,
+      "description": "Logical paths utilized by AEGIS, resolved dynamically without hard-coded paths.",
+      "properties": {
+        "repository_root": {
+          "default": ".",
+          "description": "Base canonical repository root path.",
+          "title": "Repository Root",
+          "type": "string"
+        },
+        "data_dir": {
+          "default": "data",
+          "description": "Directory for local database and persistent storage.",
+          "title": "Data Dir",
+          "type": "string"
+        },
+        "runtime_dir": {
+          "default": "runtime",
+          "description": "Directory for runtime state and model staging.",
+          "title": "Runtime Dir",
+          "type": "string"
+        },
+        "cache_dir": {
+          "default": "runtime/cache",
+          "description": "Directory for ephemeral derived caches.",
+          "title": "Cache Dir",
+          "type": "string"
+        },
+        "logs_dir": {
+          "default": "runtime/logs",
+          "description": "Directory for diagnostic and operation logs.",
+          "title": "Logs Dir",
+          "type": "string"
+        },
+        "diagnostics_dir": {
+          "default": "diagnostics",
+          "description": "Directory for health probes and diagnostic dumps.",
+          "title": "Diagnostics Dir",
+          "type": "string"
+        },
+        "temp_dir": {
+          "default": "runtime/scratch",
+          "description": "Directory for tool subprocess scratchpads.",
+          "title": "Temp Dir",
+          "type": "string"
+        },
+        "backup_dir": {
+          "default": "data/backups",
+          "description": "Directory for local recovery backup sets.",
+          "title": "Backup Dir",
+          "type": "string"
+        },
+        "workspace_dir": {
+          "default": "workspace",
+          "description": "Directory for active task file manipulation.",
+          "title": "Workspace Dir",
+          "type": "string"
+        }
+      },
+      "title": "PathConfig",
+      "type": "object"
+    },
+    "ProvisioningPolicyConfig": {
+      "additionalProperties": false,
+      "description": "Resource constraints for model and skill allocation.",
+      "properties": {
+        "max_model_storage_bytes": {
+          "default": 26843545600,
+          "minimum": 1073741824,
+          "title": "Max Model Storage Bytes",
+          "type": "integer"
+        },
+        "min_reserved_storage_bytes": {
+          "default": 10737418240,
+          "minimum": 1073741824,
+          "title": "Min Reserved Storage Bytes",
+          "type": "integer"
+        },
+        "preferred_residency": {
+          "default": "manager_priority",
+          "description": "VRAM residency strategy ('manager_priority', 'balanced', 'on_demand').",
+          "title": "Preferred Residency",
+          "type": "string"
+        },
+        "resource_priority": {
+          "default": "manager",
+          "description": "Component with first claim on GPU acceleration.",
+          "title": "Resource Priority",
+          "type": "string"
+        },
+        "vram_budget_bytes": {
+          "default": 5368709120,
+          "minimum": 1073741824,
+          "title": "Vram Budget Bytes",
+          "type": "integer"
+        },
+        "ram_budget_bytes": {
+          "default": 4294967296,
+          "minimum": 536870912,
+          "title": "Ram Budget Bytes",
+          "type": "integer"
+        },
+        "cpu_core_limit": {
+          "default": 8,
+          "minimum": 1,
+          "title": "Cpu Core Limit",
+          "type": "integer"
+        },
+        "optional_capability_budget": {
+          "additionalProperties": true,
+          "title": "Optional Capability Budget",
+          "type": "object"
+        }
+      },
+      "title": "ProvisioningPolicyConfig",
+      "type": "object"
+    },
+    "RAMProfile": {
+      "additionalProperties": false,
+      "description": "Detected RAM capacity.",
+      "properties": {
+        "total_bytes": {
+          "default": 17179869184,
+          "minimum": 1073741824,
+          "title": "Total Bytes",
+          "type": "integer"
+        },
+        "available_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Available Bytes"
+        },
+        "memory_compression_active": {
+          "default": false,
+          "title": "Memory Compression Active",
+          "type": "boolean"
+        }
+      },
+      "title": "RAMProfile",
+      "type": "object"
+    },
+    "RuntimeProfile": {
+      "additionalProperties": false,
+      "description": "Host execution runtimes.",
+      "properties": {
+        "python_version": {
+          "default": "3.12.10",
+          "title": "Python Version",
+          "type": "string"
+        },
+        "node_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "24.13.0",
+          "title": "Node Version"
+        },
+        "cuda_available": {
+          "default": true,
+          "title": "Cuda Available",
+          "type": "boolean"
+        },
+        "ollama_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "0.34.0",
+          "title": "Ollama Version"
+        }
+      },
+      "title": "RuntimeProfile",
+      "type": "object"
+    },
+    "StorageDriveProfile": {
+      "additionalProperties": false,
+      "description": "Storage volume characteristics.",
+      "properties": {
+        "device_id": {
+          "default": "C:",
+          "title": "Device Id",
+          "type": "string"
+        },
+        "total_bytes": {
+          "default": 536870912000,
+          "minimum": 1073741824,
+          "title": "Total Bytes",
+          "type": "integer"
+        },
+        "free_bytes": {
+          "default": 107374182400,
+          "minimum": 0,
+          "title": "Free Bytes",
+          "type": "integer"
+        },
+        "filesystem": {
+          "default": "NTFS",
+          "title": "Filesystem",
+          "type": "string"
+        }
+      },
+      "title": "StorageDriveProfile",
+      "type": "object"
+    },
+    "StoragePolicyConfig": {
+      "additionalProperties": false,
+      "description": "Storage limits and disk hygiene thresholds.",
+      "properties": {
+        "max_storage_allocation_bytes": {
+          "default": 53687091200,
+          "description": "Maximum storage allocated to AEGIS across all domains.",
+          "minimum": 1073741824,
+          "title": "Max Storage Allocation Bytes",
+          "type": "integer"
+        },
+        "cache_limit_bytes": {
+          "default": 5368709120,
+          "description": "Maximum ephemeral cache size before LRU eviction.",
+          "minimum": 104857600,
+          "title": "Cache Limit Bytes",
+          "type": "integer"
+        },
+        "backup_limit_bytes": {
+          "default": 21474836480,
+          "description": "Maximum total storage for local recovery backups.",
+          "minimum": 1073741824,
+          "title": "Backup Limit Bytes",
+          "type": "integer"
+        },
+        "model_storage_allocation_bytes": {
+          "default": 21474836480,
+          "description": "Maximum storage for local model checkpoints.",
+          "minimum": 1073741824,
+          "title": "Model Storage Allocation Bytes",
+          "type": "integer"
+        },
+        "user_data_allocation_bytes": {
+          "default": 21474836480,
+          "description": "Maximum storage for user artifacts and databases.",
+          "minimum": 1073741824,
+          "title": "User Data Allocation Bytes",
+          "type": "integer"
+        },
+        "temp_storage_limit_bytes": {
+          "default": 2147483648,
+          "description": "Maximum temporary execution buffer allocation.",
+          "minimum": 52428800,
+          "title": "Temp Storage Limit Bytes",
+          "type": "integer"
+        },
+        "low_disk_threshold_bytes": {
+          "default": 5368709120,
+          "description": "Threshold triggering low-disk warning and throttle.",
+          "minimum": 524288000,
+          "title": "Low Disk Threshold Bytes",
+          "type": "integer"
+        },
+        "cleanup_threshold_percent": {
+          "default": 85.0,
+          "description": "Storage utilization percentage triggering automated cache cleanup.",
+          "maximum": 99.0,
+          "minimum": 50.0,
+          "title": "Cleanup Threshold Percent",
+          "type": "number"
+        }
+      },
+      "title": "StoragePolicyConfig",
+      "type": "object"
+    },
+    "SystemConfig": {
+      "additionalProperties": false,
+      "description": "System-level runtime metadata and versioning.",
+      "properties": {
+        "config_version": {
+          "default": "1.0.0",
+          "description": "Configuration schema version.",
+          "title": "Config Version",
+          "type": "string"
+        },
+        "installation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Unique installation GUID or reference.",
+          "title": "Installation Id"
+        },
+        "environment": {
+          "default": "development",
+          "description": "Operating environment name ('development', 'testing', 'production').",
+          "title": "Environment",
+          "type": "string"
+        },
+        "platform": {
+          "default": "windows",
+          "description": "Target operating system platform.",
+          "title": "Platform",
+          "type": "string"
+        },
+        "diagnostics_mode": {
+          "default": false,
+          "description": "Enable continuous system health monitoring.",
+          "title": "Diagnostics Mode",
+          "type": "boolean"
+        },
+        "dev_mode": {
+          "default": true,
+          "description": "Enables developer diagnostics (does not weaken Trust Core).",
+          "title": "Dev Mode",
+          "type": "boolean"
+        }
+      },
+      "title": "SystemConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Root configuration container uniting all declarative AEGIS domains.",
+  "properties": {
+    "system": {
+      "$ref": "#/$defs/SystemConfig"
+    },
+    "paths": {
+      "$ref": "#/$defs/PathConfig"
+    },
+    "storage": {
+      "$ref": "#/$defs/StoragePolicyConfig"
+    },
+    "hardware": {
+      "$ref": "#/$defs/HardwareProfile"
+    },
+    "provisioning": {
+      "$ref": "#/$defs/ProvisioningPolicyConfig"
+    },
+    "autonomy": {
+      "$ref": "#/$defs/AutonomyConfig"
+    },
+    "network": {
+      "$ref": "#/$defs/NetworkConfig"
+    },
+    "channels": {
+      "$ref": "#/$defs/ChannelConfig"
+    },
+    "notifications": {
+      "$ref": "#/$defs/NotificationConfig"
+    },
+    "memory": {
+      "$ref": "#/$defs/MemoryConfig"
+    },
+    "logging": {
+      "$ref": "#/$defs/LoggingConfig"
+    },
+    "developer": {
+      "$ref": "#/$defs/DeveloperConfig"
+    }
+  },
+  "title": "AegisConfig",
+  "type": "object"
+}
