@@ -686,9 +686,10 @@ def test_50_no_secrets_in_storage_config():
 
 
 def test_51_zero_domain_tables(temp_db_path: Path):
-    """Assert only schema_migrations and storage_metadata exist in database."""
+    """Assert only schema_migrations and storage_metadata exist in database for migration 1."""
     with open_database(temp_db_path) as conn:
-        apply_migrations(conn, get_builtin_migrations())
+        m1 = [m for m in get_builtin_migrations() if m.version == 1]
+        apply_migrations(conn, m1)
         tables = [
             r[0]
             for r in conn.execute(
@@ -732,9 +733,10 @@ def test_52_live_storage_smoke_test(temp_db_dir: Path):
         bootstrap_schema_migrations(conn)
         assert get_current_schema_version(conn) == 0
 
-        # 3. Apply migration 0001
-        apply_migrations(conn, get_builtin_migrations())
-        assert get_current_schema_version(conn) == 1
+        # 3. Apply all built-in migrations
+        builtin = get_builtin_migrations()
+        apply_migrations(conn, builtin)
+        assert get_current_schema_version(conn) == len(builtin)
 
         # 4. Commit transaction in storage_metadata
         with transaction(conn) as cur:
