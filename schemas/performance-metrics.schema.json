@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://aegis.local/schemas/performance-metrics.schema.json",
+  "title": "AegisPerformanceMetricsEvent",
+  "description": "Formal JSON Schema for AEGIS pipeline performance telemetry events and latency measurements.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "trace_id",
+    "task_id",
+    "stage_name",
+    "execution_path",
+    "timestamp_start",
+    "timestamp_end",
+    "duration_ms",
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "pattern": "^evt-[0-9a-fA-F\\-]+$",
+      "description": "Unique identifier for this telemetry measurement event."
+    },
+    "trace_id": {
+      "type": "string",
+      "pattern": "^trc-[0-9a-fA-F\\-]+$",
+      "description": "Trace correlation identifier linking all sub-events of a single user interaction."
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^tsk-[0-9a-fA-F\\-]+$",
+      "description": "Task identifier associated with the specific operational step."
+    },
+    "stage_name": {
+      "type": "string",
+      "enum": [
+        "INPUT_NORMALIZATION",
+        "CACHE_LOOKUP",
+        "FAST_PATH_DECISION",
+        "MEMORY_RETRIEVAL",
+        "CONTEXT_ASSEMBLY",
+        "MANAGER_LOAD",
+        "MANAGER_INFERENCE",
+        "SKILL_LOAD",
+        "TOOL_EXECUTION",
+        "TRUST_CORE_AUTH",
+        "STEP_VERIFICATION",
+        "RESPONSE_ASSEMBLY",
+        "END_TO_END"
+      ],
+      "description": "The discrete lifecycle pipeline stage measured."
+    },
+    "execution_path": {
+      "type": "string",
+      "enum": [
+        "FAST_PATH",
+        "MANAGER_STANDARD",
+        "BACKGROUND"
+      ],
+      "description": "The routing path taken for the enclosing task execution."
+    },
+    "timestamp_start": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp marking the beginning of the stage."
+    },
+    "timestamp_end": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp marking the conclusion of the stage."
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 0.0,
+      "description": "Total elapsed duration for this stage in milliseconds."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "SUCCESS",
+        "FAILURE",
+        "TIMEOUT",
+        "DEGRADED",
+        "SKIPPED"
+      ],
+      "description": "Outcome status of the stage execution."
+    },
+    "hardware_context": {
+      "type": "object",
+      "description": "Point-in-time hardware load indicators during stage execution.",
+      "properties": {
+        "memory_load_percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "cpu_busy_percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "vram_used_mb": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Sanitized, non-secret diagnostic metadata relating to the event.",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean",
+          "null"
+        ]
+      }
+    }
+  }
+}

@@ -31,6 +31,15 @@
   * Channel-affine routing (WhatsApp -> WhatsApp, Desktop -> Desktop) with explicit user-policy cross-channel notifications.
   * Operational autonomy frozen at Tiers 0 to 3, decoupling operational autonomy from action-risk classification.
   * Model implementation details strictly abstracted from user-facing controls.
+* **Formal Amendments**:
+  * **Amendment 001 (Performance Architecture)**:
+    * *Identifier*: `AMENDMENT-001-PERFORMANCE`
+    * *Date of Amendment*: 2026-09-20
+    * *Document*: `docs/specifications/AEGIS_ARCHITECTURE_AMENDMENT_001_PERFORMANCE.md`
+    * *Key Additions*:
+      * **Fast Path Architecture**: Low-latency execution route prioritizing deterministic rules, cached state, and known workflows.
+      * **Fast Decision Engine**: Advisory, lightweight routing abstraction for bounded classification without bypassing Trust Core.
+      * **Performance Telemetry Architecture**: Pipeline stage latency measurement, zero-secret telemetry, and percentile tracking.
 
 ---
 
