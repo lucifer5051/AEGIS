@@ -57,6 +57,29 @@ class LogLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class SQLiteJournalMode(str, Enum):
+    """Supported SQLite journal modes."""
+
+    WAL = "WAL"
+    MEMORY = "MEMORY"
+
+
+class SQLiteSynchronousMode(str, Enum):
+    """Supported SQLite synchronous modes."""
+
+    FULL = "FULL"
+    NORMAL = "NORMAL"
+    OFF = "OFF"
+
+
+class SQLiteTempStoreMode(str, Enum):
+    """Supported SQLite temp_store modes."""
+
+    MEMORY = "MEMORY"
+    FILE = "FILE"
+    DEFAULT = "DEFAULT"
+
+
 # ==============================================================================
 # BASE CONFIGURATION MODEL
 # ==============================================================================
@@ -234,6 +257,33 @@ class StoragePolicyConfig(AegisBaseConfig):
         ge=50.0,
         le=99.0,
         description="Storage utilization percentage triggering automated cache cleanup.",
+    )
+    # SQLite Persistence Runtime Configuration (Configuration policy, not security authority)
+    database_path: Optional[str] = Field(
+        default=None,
+        description="Explicit database path. If None, resolved outside OneDrive.",
+    )
+    busy_timeout_ms: int = Field(
+        default=5000,
+        ge=100,
+        le=60000,
+        description="SQLite busy timeout in milliseconds (100ms - 60000ms).",
+    )
+    journal_mode: SQLiteJournalMode = Field(
+        default=SQLiteJournalMode.WAL,
+        description="SQLite journal mode constraint (WAL or MEMORY).",
+    )
+    synchronous: SQLiteSynchronousMode = Field(
+        default=SQLiteSynchronousMode.NORMAL,
+        description="SQLite synchronous pragma constraint (FULL, NORMAL, or OFF).",
+    )
+    foreign_keys: bool = Field(
+        default=True,
+        description="Enforce SQLite relational foreign key integrity.",
+    )
+    temp_store: SQLiteTempStoreMode = Field(
+        default=SQLiteTempStoreMode.MEMORY,
+        description="SQLite temp store location constraint (MEMORY, FILE, or DEFAULT).",
     )
 
 
