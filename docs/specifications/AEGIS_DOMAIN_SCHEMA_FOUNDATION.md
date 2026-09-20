@@ -45,9 +45,15 @@ Migration 0002 (ekm_schema):
   entity_relationships        ← FK: projects, entities (source + target)
 
 Migration 0003 (conversations_schema):
-  conversations               ← FK: projects (ON DELETE SET NULL)
+  conversations               ← initial channel conversation containers
   ↓
   messages                    ← FK: conversations (ON DELETE CASCADE)
+
+Migration 0004 (domain_schema_consistency):
+  - Normalizes legacy/non-canonical trust levels to canonical M0-M4
+  - Reconstructs conversations with FK: projects (ON DELETE CASCADE)
+  - Reconstructs messages maintaining strict foreign key topology
+  - Restores all indexes and constraints
 ```
 
 ---
@@ -108,6 +114,10 @@ frozen architecture change.
 | M2 | Tool-Supported | Corroborated by deterministic tool execution |
 | M3 | Verified | Corroborated across multiple independent tools |
 | M4 | User-Confirmed | Explicitly affirmed/corrected by authenticated user |
+
+Canonical database codes are strictly `M0`, `M1`, `M2`, `M3`, and `M4`.
+Alternative names (such as `M0_TRANSIENT` or `M4_AXIOMATIC`) represent architectural drift;
+they are normalized to canonical codes via Migration 0004 and rejected by the runtime API.
 
 External/web-scraped content enters at **M0** and is flagged `is_tainted = 1` in evidence.
 
@@ -206,7 +216,7 @@ Supported channels: `desktop | whatsapp | system_cli`
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | `conversation_id` | TEXT | PRIMARY KEY | UUIDv4 |
-| `project_id` | TEXT | NULL | FK → projects **(ON DELETE SET NULL)** |
+| `project_id` | TEXT | NULL | FK → projects **(ON DELETE CASCADE)** |
 | `channel` | TEXT | NOT NULL, CHECK | `desktop\|whatsapp\|system_cli` |
 | `channel_conversation_id` | TEXT | NOT NULL | WhatsApp JID / Desktop window ID |
 | `title` | TEXT | NULL | Optional display title |
@@ -214,10 +224,11 @@ Supported channels: `desktop | whatsapp | system_cli`
 | `created_at` | TEXT | NOT NULL | UTC ISO-8601 |
 | `updated_at` | TEXT | NOT NULL | UTC ISO-8601 |
 
-> **Why ON DELETE SET NULL?**  
-> Conversation history is user-owned authoritative data. When a project is deleted,
-> conversation records should not be purged — they become orphaned (project_id=NULL)
-> and remain queryable for user recovery, audit, and cross-project analysis.
+> **Project Deletion & Scoping Semantics:**  
+> When a project is permanently deleted, all project-owned conversations (`project_id = :uuid`)
+> are deleted via `ON DELETE CASCADE`, which in turn cascades to their `messages`.
+> Global conversations (`project_id IS NULL`), such as general system CLI or default user
+> channel conversations, survive project deletion and remain permanently accessible.
 
 ### 5.3 Table: `messages`
 
@@ -240,7 +251,19 @@ Individual turns within a conversation.
 
 ---
 
-## 6. Foreign Key Behavior Summary
+## 6. Explicit Project Cascade Ownership Matrix
+
+| Entity | `project_id` nullable | On project delete |
+|---|---:|---|
+| Memory facts | Yes | Cascade only for project-scoped records (`project_id IS NOT NULL`) |
+| Memory evidence | Depends on parent / Yes | Follow parent memory; project-scoped evidence cascades |
+| Preferences | Yes | Project-scoped entries removed (`ON DELETE CASCADE`) |
+| Entities | Yes | Defined per ownership model; project entities cascade |
+| Relationships | Yes | Remove project-owned relations (`ON DELETE CASCADE`) |
+| Conversations | Yes | **CASCADE** (project-owned conversations removed) |
+| Messages | No project FK | Cascade through parent conversation |
+
+### Detailed Foreign Key Action Mapping
 
 | Child Table | Parent Table | Column | ON DELETE |
 |-------------|-------------|--------|-----------|
@@ -255,7 +278,7 @@ Individual turns within a conversation.
 | `entity_relationships` | `projects` | `project_id` | CASCADE |
 | `entity_relationships` | `entities` | `source_entity_id` | CASCADE |
 | `entity_relationships` | `entities` | `target_entity_id` | CASCADE |
-| `conversations` | `projects` | `project_id` | **SET NULL** |
+| `conversations` | `projects` | `project_id` | **CASCADE** |
 | `messages` | `conversations` | `conversation_id` | CASCADE |
 
 ---

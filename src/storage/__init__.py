@@ -56,6 +56,13 @@ from src.storage.paths import (
     resolve_database_path,
     validate_database_path,
 )
+from src.storage.trust_levels import (
+    MEMORY_TRUST_LEVEL_SEMANTICS,
+    NON_CANONICAL_TRUST_ALIASES,
+    MemoryTrustLevel,
+    get_trust_level_semantic,
+    resolve_trust_level,
+)
 
 __all__ = [
     # Errors
@@ -102,4 +109,10 @@ __all__ = [
     "DatabaseHealthState",
     "DatabaseHealthReport",
     "check_database_health",
+    # Trust Levels
+    "MemoryTrustLevel",
+    "MEMORY_TRUST_LEVEL_SEMANTICS",
+    "NON_CANONICAL_TRUST_ALIASES",
+    "resolve_trust_level",
+    "get_trust_level_semantic",
 ]

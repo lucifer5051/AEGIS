@@ -28,8 +28,16 @@ from src.storage.health import DatabaseHealthState, check_database_health
 from src.storage.migrations import (
     apply_migrations,
     bootstrap_schema_migrations,
+    compute_sql_checksum,
     get_current_schema_version,
     load_migrations_from_directory,
+)
+from src.storage.trust_levels import (
+    MEMORY_TRUST_LEVEL_SEMANTICS,
+    NON_CANONICAL_TRUST_ALIASES,
+    MemoryTrustLevel,
+    get_trust_level_semantic,
+    resolve_trust_level,
 )
 
 # ---------------------------------------------------------------------------
@@ -111,10 +119,10 @@ def _get_tables(conn: sqlite3.Connection) -> List[str]:
 
 
 def test_01_all_domain_migrations_apply() -> None:
-    """All migrations (0001-0003) apply without error."""
+    """All migrations (0001-0004) apply without error."""
     with _tmp_db() as conn:
         version = get_current_schema_version(conn)
-        assert version == 3
+        assert version == 4
 
 
 def test_02_migration_ordering_is_correct() -> None:
@@ -122,7 +130,7 @@ def test_02_migration_ordering_is_correct() -> None:
     migrations = load_migrations_from_directory(MIGRATIONS_DIR)
     versions = [m.version for m in migrations]
     assert versions == sorted(versions)
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]
 
 
 def test_03_foreign_keys_enabled() -> None:
@@ -133,9 +141,9 @@ def test_03_foreign_keys_enabled() -> None:
 
 
 def test_04_schema_version_after_all_migrations() -> None:
-    """Schema version is 3 after all migrations applied."""
+    """Schema version is 4 after all migrations applied."""
     with _tmp_db() as conn:
-        assert get_current_schema_version(conn) == 3
+        assert get_current_schema_version(conn) == 4
 
 
 def test_05_migration_rerun_is_safe() -> None:
@@ -149,7 +157,7 @@ def test_05_migration_rerun_is_safe() -> None:
         apply_migrations(conn, migrations)
         # Re-apply — must not raise or duplicate
         applied = apply_migrations(conn, migrations)
-        assert len(applied) == 3
+        assert len(applied) == 4
         conn.close()
     finally:
         for ext in ("", "-wal", "-shm"):
@@ -792,7 +800,7 @@ def test_40_no_network_access_in_schema() -> None:
     """Schema operations use only local SQLite; no network access."""
     with _tmp_db() as conn:
         version = get_current_schema_version(conn)
-        assert version == 3
+        assert version == 4
 
 
 # ---------------------------------------------------------------------------
@@ -816,7 +824,7 @@ def test_41_domain_schema_full_smoke_test() -> None:
         # 2. Apply all migrations
         bootstrap_schema_migrations(conn)
         apply_migrations(conn, migrations)
-        assert get_current_schema_version(conn) == 3
+        assert get_current_schema_version(conn) == 4
 
         now = _now_utc()
 
@@ -938,3 +946,540 @@ def test_41_domain_schema_full_smoke_test() -> None:
     finally:
         for ext in ("", "-wal", "-shm"):
             Path(str(db_path) + ext).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 13. PROMPT 013: DOMAIN SCHEMA CONSISTENCY & RECONSTRUCTION TESTS
+# ---------------------------------------------------------------------------
+
+
+def test_42_canonical_trust_levels_accepted() -> None:
+    """Canonical trust levels M0-M4 are accepted across all memory domain tables."""
+    with _tmp_db() as conn:
+        now = _now_utc()
+        for level in ("M0", "M1", "M2", "M3", "M4"):
+            with transaction(conn) as cur:
+                # 1. memory_facts
+                cur.execute(
+                    _INS_FACT,
+                    (_uuid(), None, level, "domain", "S", "P", "O", "system", now, now, now),
+                )
+                # 2. user_preferences
+                cur.execute(
+                    "INSERT INTO user_preferences "
+                    "(preference_id, project_id, domain, preference_key, preference_value,"
+                    " preference_type, trust_level, created_at, updated_at) "
+                    "VALUES (?, NULL, 'coding', ?, 'val', 'string', ?, ?, ?);",
+                    (_uuid(), f"key_{level}", level, now, now),
+                )
+
+        count_facts = conn.execute("SELECT COUNT(*) FROM memory_facts;").fetchone()[0]
+        count_prefs = conn.execute("SELECT COUNT(*) FROM user_preferences;").fetchone()[0]
+        assert count_facts == 5
+        assert count_prefs == 5
+
+
+def test_43_non_canonical_trust_aliases_rejected_by_check_constraint() -> None:
+    """Non-canonical aliases (e.g., M0_TRANSIENT, M4_AXIOMATIC) are rejected by CHECK constraint."""
+    with _tmp_db() as conn:
+        now = _now_utc()
+        forbidden_aliases = [
+            "M0_TRANSIENT",
+            "M0_RAW",
+            "M1_AGENT_CLAIM",
+            "M2_TOOL_SUPPORTED",
+            "M3_VERIFIED",
+            "M4_AXIOMATIC",
+            "M4_USER_CONFIRMED",
+            "M5",
+            "RAW",
+            "CONFIRMED",
+        ]
+        for alias in forbidden_aliases:
+            with pytest.raises(sqlite3.IntegrityError):
+                with transaction(conn) as cur:
+                    cur.execute(
+                        _INS_FACT,
+                        (_uuid(), None, alias, "domain", "S", "P", "O", "tool", now, now, now),
+                    )
+
+
+def test_44_trust_level_enum_and_semantics_mapping() -> None:
+    """MemoryTrustLevel enum and MEMORY_TRUST_LEVEL_SEMANTICS strictly match frozen architecture."""
+    expected_semantics = {
+        "M0": "Raw Observation",
+        "M1": "Agent Claim",
+        "M2": "Tool-Supported",
+        "M3": "Verified",
+        "M4": "User-Confirmed",
+    }
+    assert MEMORY_TRUST_LEVEL_SEMANTICS == expected_semantics
+    for code, semantic in expected_semantics.items():
+        enum_member = MemoryTrustLevel(code)
+        assert enum_member.value == code
+        assert get_trust_level_semantic(enum_member) == semantic
+        assert get_trust_level_semantic(code) == semantic
+
+
+def test_45_trust_level_resolver_alias_normalization() -> None:
+    """resolve_trust_level normalizes legacy aliases and rejects invalid codes."""
+    # Canonical resolution
+    for code in ("M0", "M1", "M2", "M3", "M4"):
+        assert resolve_trust_level(code) == MemoryTrustLevel(code)
+        assert resolve_trust_level(code.lower()) == MemoryTrustLevel(code)
+
+    # Legacy alias normalization
+    assert "M0_TRANSIENT" in NON_CANONICAL_TRUST_ALIASES
+    assert resolve_trust_level("M0_TRANSIENT") == MemoryTrustLevel.M0
+    assert resolve_trust_level("M1_AGENT_CLAIM") == MemoryTrustLevel.M1
+    assert resolve_trust_level("M2_TOOL_SUPPORTED") == MemoryTrustLevel.M2
+    assert resolve_trust_level("M3_VERIFIED") == MemoryTrustLevel.M3
+    assert resolve_trust_level("M4_AXIOMATIC") == MemoryTrustLevel.M4
+
+    # Invalid code rejection
+    for invalid in ("M5", "M_INVALID", "UNKNOWN", ""):
+        with pytest.raises(ValueError):
+            resolve_trust_level(invalid)
+
+
+def test_46_project_memory_ownership_cascade() -> None:
+    """Project deletion cascades to all project-scoped memory domain records."""
+    with _tmp_db() as conn:
+        now = _now_utc()
+        pid = _uuid()
+        with transaction(conn) as cur:
+            cur.execute(_INS_PROJ, (pid, "Project Cascade", "proj-cascade", "ACTIVE", now, now))
+            # 1. evidence
+            eid = _uuid()
+            cur.execute(
+                "INSERT INTO memory_evidence "
+                "(evidence_id, project_id, evidence_type, source_reference,"
+                " raw_content_snippet, content_hash, recorded_at) "
+                "VALUES (?, ?, 'tool_output', 'src', 'snippet', 'hash', ?);",
+                (eid, pid, now),
+            )
+            # 2. facts
+            cur.execute(
+                _INS_FACT,
+                (_uuid(), pid, "M2", "domain", "S", "P", "O", "tool", now, now, now),
+            )
+            # 3. preferences
+            cur.execute(
+                "INSERT INTO user_preferences "
+                "(preference_id, project_id, domain, preference_key, preference_value,"
+                " preference_type, trust_level, created_at, updated_at) "
+                "VALUES (?, ?, 'coding', 'indent', '4', 'string', 'M4', ?, ?);",
+                (_uuid(), pid, now, now),
+            )
+            # 4. entities
+            ent_id = _uuid()
+            cur.execute(_INS_ENTITY, (ent_id, pid, "concept", "Concept", "slug-c", now, now))
+            # 5. entity_relationships
+            ent_target = _uuid()
+            cur.execute(_INS_ENTITY, (ent_target, pid, "concept", "Target", "slug-t", now, now))
+            cur.execute(
+                "INSERT INTO entity_relationships "
+                "(relation_id, project_id, source_entity_id, target_entity_id,"
+                " relation_type, trust_level, valid_from, created_at) "
+                "VALUES (?, ?, ?, ?, 'related_to', 'M3', ?, ?);",
+                (_uuid(), pid, ent_id, ent_target, now, now),
+            )
+
+        # Delete project
+        with transaction(conn) as cur:
+            cur.execute("DELETE FROM projects WHERE project_id = ?;", (pid,))
+
+        # Verify all project records cascaded
+        for table in [
+            "memory_evidence",
+            "memory_facts",
+            "user_preferences",
+            "entities",
+            "entity_relationships",
+        ]:
+            count = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE project_id = ?;", (pid,)
+            ).fetchone()[0]
+            assert count == 0, f"Table '{table}' failed to cascade delete on project deletion"
+
+
+def test_47_global_memory_preservation() -> None:
+    """Global memory records (project_id IS NULL) are 100% preserved after project deletion."""
+    with _tmp_db() as conn:
+        now = _now_utc()
+        pid = _uuid()
+
+        with transaction(conn) as cur:
+            cur.execute(_INS_PROJ, (pid, "Transient Proj", "transient-proj", "ACTIVE", now, now))
+            # Global records
+            cur.execute(
+                _INS_FACT,
+                (_uuid(), None, "M4", "user", "User", "prefers", "Python", "user", now, now, now),
+            )
+            cur.execute(
+                "INSERT INTO user_preferences "
+                "(preference_id, project_id, domain, preference_key, preference_value,"
+                " preference_type, trust_level, created_at, updated_at) "
+                "VALUES (?, NULL, 'communication', 'tone', 'direct', 'string', 'M4', ?, ?);",
+                (_uuid(), now, now),
+            )
+            # Project records
+            cur.execute(
+                _INS_FACT,
+                (_uuid(), pid, "M1", "domain", "Local", "scope", "val", "tool", now, now, now),
+            )
+
+        # Delete project
+        with transaction(conn) as cur:
+            cur.execute("DELETE FROM projects WHERE project_id = ?;", (pid,))
+
+        # Global records survive
+        facts = conn.execute(
+            "SELECT COUNT(*) FROM memory_facts WHERE project_id IS NULL;"
+        ).fetchone()[0]
+        prefs = conn.execute(
+            "SELECT COUNT(*) FROM user_preferences WHERE project_id IS NULL;"
+        ).fetchone()[0]
+        assert facts == 1
+        assert prefs == 1
+
+
+def test_48_project_conversation_deletion_cascade() -> None:
+    """Project-owned conversations and their messages CASCADE on project deletion."""
+    with _tmp_db() as conn:
+        now = _now_utc()
+        pid = _uuid()
+        cid = _uuid()
+        mid1 = _uuid()
+        mid2 = _uuid()
+
+        with transaction(conn) as cur:
+            cur.execute(_INS_PROJ, (pid, "Proj Conv", "proj-conv", "ACTIVE", now, now))
+            cur.execute(_INS_CONV, (cid, pid, "desktop", "win-1", "ACTIVE", now, now))
+            cur.execute(_INS_MSG, (mid1, cid, "user", "desktop", 1, "Msg 1", now))
+            cur.execute(_INS_MSG, (mid2, cid, "assistant", "desktop", 2, "Msg 2", now))
+
+        # Delete project
+        with transaction(conn) as cur:
+            cur.execute("DELETE FROM projects WHERE project_id = ?;", (pid,))
+
+        # Both conversation and its messages must be cascaded away (NOT set to NULL!)
+        conv_count = conn.execute(
+            "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?;", (cid,)
+        ).fetchone()[0]
+        msg_count = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?;", (cid,)
+        ).fetchone()[0]
+        assert conv_count == 0, "Project conversation was not deleted on project CASCADE"
+        assert msg_count == 0, "Messages were not cascaded on conversation deletion"
+
+
+def test_49_global_conversation_preservation() -> None:
+    """Global conversations (project_id IS NULL) and their messages survive project deletion."""
+    with _tmp_db() as conn:
+        now = _now_utc()
+        pid = _uuid()
+        proj_cid = _uuid()
+        glob_cid = _uuid()
+
+        with transaction(conn) as cur:
+            cur.execute(_INS_PROJ, (pid, "Proj X", "proj-x", "ACTIVE", now, now))
+            # Project conversation
+            cur.execute(_INS_CONV, (proj_cid, pid, "desktop", "win-proj", "ACTIVE", now, now))
+            cur.execute(_INS_MSG, (_uuid(), proj_cid, "user", "desktop", 1, "Proj msg", now))
+            # Global conversation (e.g. system CLI)
+            cur.execute(_INS_CONV, (glob_cid, None, "system_cli", "cli-main", "ACTIVE", now, now))
+            cur.execute(_INS_MSG, (_uuid(), glob_cid, "user", "system_cli", 1, "Global msg", now))
+
+        # Delete project
+        with transaction(conn) as cur:
+            cur.execute("DELETE FROM projects WHERE project_id = ?;", (pid,))
+
+        # Project conversation is gone
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?;", (proj_cid,)
+            ).fetchone()[0]
+            == 0
+        )
+
+        # Global conversation and message survive
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?;", (glob_cid,)
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?;", (glob_cid,)
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_50_end_to_end_fk_cascade_matrix() -> None:
+    """Verify complete cascade matrix across all 7 domain tables simultaneously."""
+    with _tmp_db() as conn:
+        now = _now_utc()
+        pid = _uuid()
+        with transaction(conn) as cur:
+            cur.execute(_INS_PROJ, (pid, "Full Matrix", "full-matrix", "ACTIVE", now, now))
+            # 1. evidence
+            eid = _uuid()
+            cur.execute(
+                "INSERT INTO memory_evidence "
+                "(evidence_id, project_id, evidence_type, source_reference,"
+                " raw_content_snippet, content_hash, recorded_at) "
+                "VALUES (?, ?, 'tool_output', 'src', 'snippet', 'hash', ?);",
+                (eid, pid, now),
+            )
+            # 2. facts
+            cur.execute(
+                _INS_FACT,
+                (_uuid(), pid, "M2", "domain", "S", "P", "O", "tool", now, now, now),
+            )
+            # 3. preferences
+            cur.execute(
+                "INSERT INTO user_preferences "
+                "(preference_id, project_id, domain, preference_key, preference_value,"
+                " preference_type, trust_level, created_at, updated_at) "
+                "VALUES (?, ?, 'coding', 'k', 'v', 'string', 'M3', ?, ?);",
+                (_uuid(), pid, now, now),
+            )
+            # 4. entities
+            e1 = _uuid()
+            e2 = _uuid()
+            cur.execute(_INS_ENTITY, (e1, pid, "concept", "C1", "c1", now, now))
+            cur.execute(_INS_ENTITY, (e2, pid, "concept", "C2", "c2", now, now))
+            # 5. relationships
+            cur.execute(
+                "INSERT INTO entity_relationships "
+                "(relation_id, project_id, source_entity_id, target_entity_id,"
+                " relation_type, trust_level, valid_from, created_at) "
+                "VALUES (?, ?, ?, ?, 'related_to', 'M2', ?, ?);",
+                (_uuid(), pid, e1, e2, now, now),
+            )
+            # 6. conversations
+            cid = _uuid()
+            cur.execute(_INS_CONV, (cid, pid, "desktop", "win-matrix", "ACTIVE", now, now))
+            # 7. messages
+            cur.execute(_INS_MSG, (_uuid(), cid, "user", "desktop", 1, "Matrix msg", now))
+
+        # Delete project
+        with transaction(conn) as cur:
+            cur.execute("DELETE FROM projects WHERE project_id = ?;", (pid,))
+
+        # Verify 0 project rows in all tables
+        for table in [
+            "memory_evidence",
+            "memory_facts",
+            "user_preferences",
+            "entities",
+            "entity_relationships",
+            "conversations",
+        ]:
+            assert (
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE project_id = ?;", (pid,)
+                ).fetchone()[0]
+                == 0
+            )
+
+        # Messages cascaded through conversation
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?;", (cid,)
+            ).fetchone()[0]
+            == 0
+        )
+
+        # Foreign key integrity check passes
+        assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
+
+
+def test_51_cross_entity_relationship_cascade() -> None:
+    """Deleting source or target entity cascades to entity_relationships."""
+    with _tmp_db() as conn:
+        now = _now_utc()
+        e_src = _uuid()
+        e_tgt = _uuid()
+        rel_id = _uuid()
+
+        with transaction(conn) as cur:
+            # Global entities
+            cur.execute(_INS_ENTITY, (e_src, None, "concept", "Source", "src-slug", now, now))
+            cur.execute(_INS_ENTITY, (e_tgt, None, "concept", "Target", "tgt-slug", now, now))
+            cur.execute(
+                "INSERT INTO entity_relationships "
+                "(relation_id, project_id, source_entity_id, target_entity_id,"
+                " relation_type, trust_level, valid_from, created_at) "
+                "VALUES (?, NULL, ?, ?, 'depends_on', 'M3', ?, ?);",
+                (rel_id, e_src, e_tgt, now, now),
+            )
+
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM entity_relationships WHERE relation_id = ?;", (rel_id,)
+            ).fetchone()[0]
+            == 1
+        )
+
+        # Delete source entity
+        with transaction(conn) as cur:
+            cur.execute("DELETE FROM entities WHERE entity_id = ?;", (e_src,))
+
+        # Edge must cascade
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM entity_relationships WHERE relation_id = ?;", (rel_id,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
+
+
+def test_52_migration_0004_idempotency() -> None:
+    """Migration 0004 executes cleanly and is idempotent when re-applied."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    try:
+        conn = create_connection(db_path)
+        migrations = load_migrations_from_directory(MIGRATIONS_DIR)
+        bootstrap_schema_migrations(conn)
+        apply_migrations(conn, migrations)
+
+        # Apply again
+        reapplied = apply_migrations(conn, migrations)
+        assert len(reapplied) == 4
+        assert get_current_schema_version(conn) == 4
+        assert conn.execute("PRAGMA integrity_check;").fetchone()[0] == "ok"
+        conn.close()
+    finally:
+        for ext in ("", "-wal", "-shm"):
+            Path(db_path + ext).unlink(missing_ok=True)
+
+
+def test_53_migration_checksum_integrity() -> None:
+    """All migrations (0001-0004) maintain valid, strictly monotonic checksums."""
+    migrations = load_migrations_from_directory(MIGRATIONS_DIR)
+    assert len(migrations) == 4
+    for m in migrations:
+        computed = compute_sql_checksum(m.sql)
+        assert m.checksum == computed, f"Checksum mismatch in migration {m.migration_id}"
+
+
+def test_54_full_migration_from_fresh_database() -> None:
+    """Fresh database migrates from v0 to v4 with all tables, constraints, and indexes."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    try:
+        conn = create_connection(db_path)
+        bootstrap_schema_migrations(conn)
+        assert get_current_schema_version(conn) == 0
+
+        migrations = load_migrations_from_directory(MIGRATIONS_DIR)
+        apply_migrations(conn, migrations)
+        assert get_current_schema_version(conn) == 4
+
+        # Verify all 10 tables exist
+        tables = _get_tables(conn)
+        expected = {
+            "schema_migrations",
+            "storage_metadata",
+            "projects",
+            "memory_evidence",
+            "memory_facts",
+            "user_preferences",
+            "entities",
+            "entity_relationships",
+            "conversations",
+            "messages",
+        }
+        assert expected.issubset(set(tables))
+        assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
+        assert conn.execute("PRAGMA integrity_check;").fetchone()[0] == "ok"
+        conn.close()
+    finally:
+        for ext in ("", "-wal", "-shm"):
+            Path(db_path + ext).unlink(missing_ok=True)
+
+
+def test_55_migration_from_existing_v3_database() -> None:
+    """Upgrading an existing v3 database to v4 preserves data and updates FK cascade."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    try:
+        conn = create_connection(db_path)
+        bootstrap_schema_migrations(conn)
+        all_migrations = load_migrations_from_directory(MIGRATIONS_DIR)
+
+        # 1. Apply only migrations 1-3 (Prompt 012 baseline)
+        v3_migrations = [m for m in all_migrations if m.version <= 3]
+        apply_migrations(conn, v3_migrations)
+        assert get_current_schema_version(conn) == 3
+
+        now = _now_utc()
+        pid = _uuid()
+        proj_cid = _uuid()
+        glob_cid = _uuid()
+        mid1 = _uuid()
+        mid2 = _uuid()
+
+        # 2. Pre-populate data in v3 schema
+        with transaction(conn) as cur:
+            cur.execute(_INS_PROJ, (pid, "Legacy Proj", "legacy-proj", "ACTIVE", now, now))
+            cur.execute(_INS_CONV, (proj_cid, pid, "desktop", "win-v3-proj", "ACTIVE", now, now))
+            cur.execute(_INS_MSG, (mid1, proj_cid, "user", "desktop", 1, "V3 Proj Msg", now))
+            cur.execute(
+                _INS_CONV,
+                (glob_cid, None, "system_cli", "cli-v3-glob", "ACTIVE", now, now),
+            )
+            cur.execute(_INS_MSG, (mid2, glob_cid, "user", "system_cli", 1, "V3 Glob Msg", now))
+
+        # 3. Now apply migration 0004
+        apply_migrations(conn, all_migrations)
+        assert get_current_schema_version(conn) == 4
+
+        # 4. Verify all pre-existing data was preserved
+        assert conn.execute("SELECT COUNT(*) FROM conversations;").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM messages;").fetchone()[0] == 2
+
+        # 5. Verify the updated FK behavior: deleting project now CASCADES conversations
+        with transaction(conn) as cur:
+            cur.execute("DELETE FROM projects WHERE project_id = ?;", (pid,))
+
+        # Project conversation and message are purged
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?;", (proj_cid,)
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM messages WHERE message_id = ?;", (mid1,)).fetchone()[
+                0
+            ]
+            == 0
+        )
+
+        # Global conversation and message survive
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM conversations WHERE conversation_id = ?;", (glob_cid,)
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute("SELECT COUNT(*) FROM messages WHERE message_id = ?;", (mid2,)).fetchone()[
+                0
+            ]
+            == 1
+        )
+
+        assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
+        assert conn.execute("PRAGMA integrity_check;").fetchone()[0] == "ok"
+        conn.close()
+    finally:
+        for ext in ("", "-wal", "-shm"):
+            Path(db_path + ext).unlink(missing_ok=True)
