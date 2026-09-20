@@ -160,9 +160,9 @@ def test_13_no_unexpected_application_source():
     """Assert only configuration foundation exists in src/, and zero runtime modules exist."""
     src_dir = get_canonical_root() / "src"
     assert src_dir.is_dir(), "src directory missing"
-    # In Prompt 007, src/config/ and src/hardware/ are authorized
+    # In Prompt 010, src/config/, src/hardware/, and src/benchmark/ are authorized
     # (plus standard Python __pycache__).
-    allowed_subdirs = {"config", "hardware", "__pycache__"}
+    allowed_subdirs = {"config", "hardware", "benchmark", "__pycache__"}
     for child in src_dir.iterdir():
         if child.is_dir():
             assert child.name in allowed_subdirs, (
