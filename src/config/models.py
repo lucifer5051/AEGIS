@@ -397,6 +397,27 @@ class ProvisioningPolicyConfig(AegisBaseConfig):
         ge=512 * 1024 * 1024,
     )
     cpu_core_limit: int = Field(default=8, ge=1)
+    system_ram_reserve_bytes: int = Field(
+        default=1536 * 1024 * 1024,  # 1.5 GB configurable safety floor
+        ge=256 * 1024 * 1024,
+        description="Configurable/qualification-derived safety RAM reserve kept free for OS.",
+    )
+    system_vram_reserve_bytes: int = Field(
+        default=512 * 1024 * 1024,  # 512 MB configurable GPU safety floor
+        ge=64 * 1024 * 1024,
+        description="Configurable/qualification-derived safety VRAM reserve kept free on GPU.",
+    )
+    target_concurrent_skills: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Architectural target for concurrent skills when hardware capacity permits.",
+    )
+    min_host_storage_reserve_bytes: int = Field(
+        default=40 * 1024 * 1024 * 1024,  # 40 GB hard floor on host drive
+        ge=5 * 1024 * 1024 * 1024,
+        description="Host drive free storage floor below which installations are refused.",
+    )
     optional_capability_budget: Dict[str, Any] = Field(default_factory=dict)
 
 

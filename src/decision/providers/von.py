@@ -59,10 +59,12 @@ class VonFastDecisionProvider(FastDecisionProvider):
         manifest_path: Optional[Path | str] = None,
         version: str = VON_DEFAULT_VERSION,
         backend_factory: Optional[Callable[[Path], Any]] = None,
+        concurrency_manager: Optional[Any] = None,
     ) -> None:
         super().__init__(provider_id="von", provider_version=version)
         self.version = version
         self.audited_commit = VON_AUDITED_COMMIT
+        self.concurrency_manager = concurrency_manager
 
         # Resolve model storage directory (%USERPROFILE%\.aegis\models\fast-decision\von\<version>\)
         if checkpoint_dir is not None:
@@ -300,9 +302,26 @@ class VonFastDecisionProvider(FastDecisionProvider):
                 reason=FallbackReason.PROVIDER_UNAVAILABLE,
             )
 
+        # Concurrency admission control via SkillConcurrencyManager if provided
+        lease = None
+        if self.concurrency_manager is not None:
+            from src.decision.providers.von_runtime import SKILL_VON_ROUTING
+            lease = self.concurrency_manager.acquire_skill_lease(SKILL_VON_ROUTING)
+            if lease is None:
+                logger.info(
+                    "SkillConcurrencyManager refused admission; immediate fallback to Manager."
+                )
+                return self._build_fallback_result(
+                    route=DecisionRoute.UNKNOWN_INTENT,
+                    latency_ms=0.0,
+                    reason=FallbackReason.ADMISSION_BUSY,
+                )
+
         # Non-blocking concurrency check: immediate fallback if inference is already busy
         acquired = self._inference_lock.acquire(blocking=False)
         if not acquired:
+            if lease is not None and self.concurrency_manager is not None:
+                self.concurrency_manager.release_skill_lease(lease)
             logger.info("Fast Decision concurrency limit reached; immediate non-blocking fallback.")
             return self._build_fallback_result(
                 route=DecisionRoute.UNKNOWN_INTENT,
@@ -345,6 +364,8 @@ class VonFastDecisionProvider(FastDecisionProvider):
             )
         finally:
             self._inference_lock.release()
+            if lease is not None and self.concurrency_manager is not None:
+                self.concurrency_manager.release_skill_lease(lease)
 
     def unload(self) -> None:
         """Release resident model memory."""
