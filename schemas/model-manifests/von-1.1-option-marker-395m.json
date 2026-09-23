@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "manifest_name": "von-1.1-option-marker-395m",
+  "manifest_type": "AEGIS_TRUSTED_SOURCE_CONTROLLED_MODEL_MANIFEST",
+  "manifest_version": "1.0.0",
+  "provider": "von",
+  "model_name": "von-1.1.0",
+  "model_architecture": "Option-Marker-Joint-Attention",
+  "parameter_count": "395M",
+  "source_repo": "https://github.com/wfzyx/von",
+  "source_commit": "bed7e7337791c5124a557eb59ad918cb6747b276",
+  "model_repo": "wfzyx/von",
+  "model_revision": "4b2d56a297e59b8a07f0f6ea312389d020d18ceb",
+  "model_version": "1.1.0",
+  "context_window_tokens": 8192,
+  "aegis_token_budget_ceiling": 2048,
+  "offline_policy": {
+    "network_egress_permitted": false,
+    "local_files_only": true,
+    "remote_api_permitted": false,
+    "server_mode_permitted": false
+  },
+  "required_files": {
+    "config.json": {
+      "sha256": "8a32b988f0cb6733ecbe3db622be147b7486847feecab41d13dbff4d1b8276f7",
+      "required": true,
+      "description": "Model configuration"
+    },
+    "tokenizer.json": {
+      "sha256": "3cb15bf6ae0e729a4a754160ee693b1bc2dc3b0b7407519965d38c6411d51a66",
+      "required": true,
+      "description": "Fast tokenizer vocabulary and merges"
+    },
+    "tokenizer_config.json": {
+      "sha256": "df873bc7962450532ff4bc2a9be71e21bca96b86064f26a117d91d9d9bbcb040",
+      "required": true,
+      "description": "Tokenizer settings and special token mappings"
+    },
+    "special_tokens_map.json": {
+      "sha256": "9b1287c88b0a996da6c8888b13d2f9547d7c6753cb7d29ceca13e71d2b7811bf",
+      "required": true,
+      "description": "Special token map"
+    },
+    "model.safetensors": {
+      "sha256": "47a3ff992b8d00344d18ecba1c23a7bb9184fc903d6d6ce0c3c6f8490a6188e4",
+      "required": true,
+      "description": "Base transformer weights in safetensors format"
+    },
+    "option_marker.pt": {
+      "sha256": "5bc83769c27f3d6ce7481ba93240212384a28f73e57f5c71b6935272a2490b84",
+      "required": true,
+      "description": "Option-Marker joint attention head weights"
+    }
+  },
+  "qualification_policy": {
+    "calibration_drift_mitigation": "ROUTE_SPECIFIC_ACCEPTANCE_THRESHOLDS",
+    "evaluation_datasets": [
+      "GOLDEN_ROUTING_QUALIFICATION_SET",
+      "ADVERSARIAL_EDGE_TEST_SET"
+    ],
+    "hardware_qualification": "MEASURED_PROBE_LOAD_AND_LATENCY"
+  }
+}
