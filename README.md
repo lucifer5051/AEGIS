@@ -44,11 +44,15 @@ Language models generate plans, interpret intentions, and draft actions. However
 - **Development Environment**: Isolated Python 3.12 environment, deterministic validation toolchain (`ruff`, `mypy`, `pytest`).
 - **Declarative Configuration Subsystem**: Typed Pydantic configuration schemas across 13 domains, 5-tier deterministic precedence loader, Windows path safety, and zero-secret enforcement.
 - **Hardware Profile Detection**: Read-only, deterministic inspection of CPU, RAM, GPU, storage, OS, and runtimes into validated `HardwareProfile` models with structured diagnostics.
+- **Hardware Benchmark Subsystem**: Controlled micro-benchmarking framework for CPU, memory, and storage with profile state-machine integration.
+- **Fast Decision Engine** (`src/decision/`): Intent classifier, policy router, schema validator, and sanitizer pipeline backed by a local model provider.
+- **Model Resource Policy & Skill Concurrency Engine** (`src/model_policy/`): Qualification-derived admission control targeting 2–3 concurrent skills; shared model residency; manifest-pinned artifact sizing; configurable storage/RAM/VRAM safety reserves; runtime registry with heterogeneous framework support. *(Prompt 014B — 2026-09-23)*
+  - ⚠️ **Local model runtime installation and hardware qualification (model download, live inference benchmark) are PENDING. Concurrency limits are design-specified; empirical validation has not yet been performed on this machine.**
 
 ### Not Yet Implemented
 
-- Hardware benchmarking & performance calibration
-- Model provisioning & resource budgeting runtime
+- Local model runtime installation & model artifact download *(PENDING — hardware qualification required first)*
+- Live inference benchmark & local model hardware qualification *(PENDING)*
 - Trust Core runtime & capability authorization engine
 - Manager / Supervisor execution loop
 - Skills & Tool layer runtime
@@ -139,7 +143,10 @@ aeigs/
 │   └── specifications/ # Foundational, schema, config, and hardware specs
 ├── src/                # Core AEGIS source code
 │   ├── config/         # Declarative configuration subsystem & schemas
-│   └── hardware/       # Read-only hardware profile detection subsystem
+│   ├── hardware/       # Read-only hardware profile detection subsystem
+│   ├── decision/       # Fast Decision Engine (intent → action pipeline)
+│   │   └── providers/  # Local model provider backends
+│   └── model_policy/   # Model resource policy & skill concurrency engine
 ├── tests/              # Deterministic test suites (offline validation)
 ├── schemas/            # Canonical JSON schemas and manifest definitions
 ├── config/             # Example configuration templates (zero-secret)
@@ -148,7 +155,7 @@ aeigs/
 ├── data/               # Persistent database and storage roots (git-ignored)
 ├── runtime/            # Ephemeral runtime scratchpad and cache (git-ignored)
 ├── migrations/         # Database migration scripts (staged for runtime)
-├── benchmarks/         # Future hardware benchmarking definitions
+├── benchmarks/         # Hardware benchmarking definitions
 ├── diagnostics/        # Health check and diagnostic dump storage
 └── deployment/         # Packaging and deployment artifacts
 ```
@@ -159,7 +166,7 @@ aeigs/
 
 All subsystems are backed by deterministic, offline test suites verified prior to every milestone:
 
-- **48 tests passed** (0 failures, 0 skipped, 100% offline).
+- **220 tests passed** (0 failures, 0 skipped, 100% offline) — as of Prompt 014B (2026-09-23).
 - `ruff check`: All checks passed (0 lint errors).
 - `ruff format --check`: All files formatted to standard.
 - `mypy`: 0 issues found across all source and test modules.
@@ -172,8 +179,8 @@ All subsystems are backed by deterministic, offline test suites verified prior t
 ## Roadmap
 
 - **Phase 1 — Foundation Architecture**: Base specifications, development environment, schema design, configuration subsystem, hardware detection. *(Complete)*
-- **Phase 2 — Core Runtime Infrastructure**: Storage manager, SQLite initialization, migration engine, base logging.
-- **Phase 3 — Hardware Benchmarking & Provisioning**: Controlled micro-benchmarking, profile state machine transition, model capacity budgeting.
+- **Phase 2 — Core Runtime Infrastructure**: Fast Decision Engine, domain schema, SQLite WAL storage, hardware benchmarking, model resource policy & skill concurrency engine. *(Substantially complete — 220 tests; local model runtime installation & qualification PENDING)*
+- **Phase 3 — Hardware Qualification & Model Provisioning**: Model runtime installation, local model artifact download, live inference benchmarking, empirical qualification of RAM/VRAM residency and per-inference deltas, update of concurrency limits from measured data. *(PENDING — awaiting explicit approval)*
 - **Phase 4 — Trust Core**: Cryptographic vault, deterministic authorization engine, capability gating, policy evaluator.
 - **Phase 5 — Manager / Supervisor**: Planning loop, task execution state machine, failure recovery, plan evaluation.
 - **Phase 6 — Skills & Tools**: Skill packaging format, execution sandbox, tool adapters, parameter validation.
