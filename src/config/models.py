@@ -1,4 +1,4 @@
-"""AEGIS Declarative Configuration Subsystem - Domain Models.
+"""SAGE Declarative Configuration Subsystem - Domain Models.
 
 Document Reference: docs/specifications/AEGIS_CONFIGURATION_SUBSYSTEM.md
 Constraints:
@@ -173,7 +173,7 @@ class SystemConfig(AegisBaseConfig):
 
 
 class PathConfig(AegisBaseConfig):
-    """Logical paths utilized by AEGIS, resolved dynamically without hard-coded paths."""
+    """Logical paths utilized by SAGE, resolved dynamically without hard-coded paths."""
 
     repository_root: str = Field(default=".", description="Base canonical repository root path.")
     data_dir: str = Field(
@@ -220,7 +220,7 @@ class StoragePolicyConfig(AegisBaseConfig):
     max_storage_allocation_bytes: int = Field(
         default=50 * 1024 * 1024 * 1024,  # 50 GB
         ge=1024 * 1024 * 1024,
-        description="Maximum storage allocated to AEGIS across all domains.",
+        description="Maximum storage allocated to SAGE across all domains.",
     )
     cache_limit_bytes: int = Field(
         default=5 * 1024 * 1024 * 1024,  # 5 GB
@@ -546,12 +546,12 @@ class DeveloperConfig(AegisBaseConfig):
 
 
 # ==============================================================================
-# ROOT AEGIS CONFIGURATION CONTAINER
+# ROOT SAGE CONFIGURATION CONTAINER
 # ==============================================================================
 
 
 class AegisConfig(AegisBaseConfig):
-    """Root configuration container uniting all declarative AEGIS domains."""
+    """Root configuration container uniting all declarative domains (formerly AegisConfig)."""
 
     system: SystemConfig = Field(default_factory=SystemConfig)
     paths: PathConfig = Field(default_factory=PathConfig)
@@ -565,3 +565,8 @@ class AegisConfig(AegisBaseConfig):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     developer: DeveloperConfig = Field(default_factory=DeveloperConfig)
+
+
+# Canonical SAGE project aliases (AegisConfig preserved for backward compatibility)
+SageConfig = AegisConfig
+SageBaseConfig = AegisBaseConfig

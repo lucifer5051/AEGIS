@@ -1,4 +1,4 @@
-"""AEGIS Trust Core -- Opaque, Non-Forgeable Capability Tokens.
+"""SAGE Trust Core -- Opaque, Non-Forgeable Capability Tokens.
 
 Design:
 - A Capability is a *short-lived, single-purpose, HMAC-signed token* that
@@ -172,7 +172,7 @@ class Capability:
 
 
 class CapabilityFactory:
-    """Issues and verifies AEGIS capability tokens.
+    """Issues and verifies SAGE capability tokens.
 
     A single factory instance holds the process-local signing key.  It is
     never serialised and never reused across process restarts.

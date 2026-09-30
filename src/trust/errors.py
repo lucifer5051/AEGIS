@@ -1,4 +1,4 @@
-"""AEGIS Trust Core -- Domain Exceptions.
+"""SAGE Trust Core -- Domain Exceptions.
 
 All exceptions in this module encode a fail-closed outcome.  Any caller that
 catches these exceptions MUST NOT grant the requested capability as a

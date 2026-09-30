@@ -1,5 +1,5 @@
-# ==============================================================================
-# AEGIS Example Configuration (aegis.example.yaml)
+﻿# ==============================================================================
+# SAGE Example Configuration (sage.example.yaml)
 #
 # Status: Declarative Blueprint & Safe Defaults
 # Security: Zero secrets permitted in this file. Credentials must be managed

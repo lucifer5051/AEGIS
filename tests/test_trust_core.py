@@ -1,4 +1,4 @@
-"""AEGIS Trust Core -- Comprehensive Adversarial Test Suite.
+"""SAGE Trust Core -- Comprehensive Adversarial Test Suite.
 
 Prompt 019 requirements (all must pass):
 - Typed capability records: opaque, non-forgeable, revocable.

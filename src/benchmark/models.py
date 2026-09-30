@@ -1,4 +1,4 @@
-"""Typed data models for the AEGIS Hardware Benchmark Subsystem.
+"""Typed data models for the SAGE Hardware Benchmark Subsystem.
 
 Defines benchmark modes, execution states, phase results, statistical
 aggregations, normalized metrics, and derived resource capability profiles.

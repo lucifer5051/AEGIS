@@ -1,4 +1,4 @@
-"""AEGIS Local SQLite Storage Foundation.
+"""SAGE Local SQLite Storage Foundation.
 
 Document Reference: docs/specifications/AEGIS_SQLITE_STORAGE_SUBSYSTEM.md
 Constraints:
@@ -50,6 +50,7 @@ from src.storage.paths import (
     get_default_db_path,
     get_default_logs_dir,
     get_default_runtime_dir,
+    get_default_sage_home,
     is_path_inside_onedrive,
     is_path_inside_recovery_repo,
     is_path_inside_repo,
@@ -78,6 +79,7 @@ __all__ = [
     "InsufficientStorageError",
     # Paths
     "get_default_aegis_home",
+    "get_default_sage_home",
     "get_default_data_dir",
     "get_default_db_path",
     "get_default_runtime_dir",

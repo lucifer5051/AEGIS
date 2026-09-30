@@ -1,4 +1,4 @@
-"""Optional GPU benchmark phase for AEGIS resource planning."""
+"""Optional GPU benchmark phase for SAGE resource planning."""
 
 import time
 from typing import Callable, Optional

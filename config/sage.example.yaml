@@ -1,0 +1,85 @@
+# ==============================================================================
+# SAGE Example Configuration (sage.example.yaml)
+#
+# Status: Declarative Blueprint & Safe Defaults
+# Project: SAGE — System for Autonomous Guidance & Execution (formerly AEGIS)
+# Security: Zero secrets permitted in this file. Credentials must be managed
+#           exclusively through the Credential Broker.
+# Precedence: Application Defaults -> Static YAML -> Env-Specific YAML -> Env Vars -> Runtime
+# ==============================================================================
+
+system:
+  config_version: "1.0.0"
+  installation_id: null
+  environment: "development"
+  platform: "windows"
+  diagnostics_mode: false
+  dev_mode: true
+
+paths:
+  repository_root: "."
+  data_dir: "data"
+  runtime_dir: "runtime"
+  cache_dir: "runtime/cache"
+  logs_dir: "runtime/logs"
+  diagnostics_dir: "diagnostics"
+  temp_dir: "runtime/scratch"
+  backup_dir: "data/backups"
+  workspace_dir: "workspace"
+
+storage:
+  max_storage_allocation_bytes: 53687091200      # 50 GB
+  cache_limit_bytes: 5368709120                  # 5 GB
+  backup_limit_bytes: 21474836480                # 20 GB
+  model_storage_allocation_bytes: 21474836480    # 20 GB
+  user_data_allocation_bytes: 21474836480        # 20 GB
+  temp_storage_limit_bytes: 2147483648           # 2 GB
+  low_disk_threshold_bytes: 5368709120           # 5 GB
+  cleanup_threshold_percent: 85.0
+
+provisioning:
+  max_model_storage_bytes: 26843545600           # 25 GB
+  min_reserved_storage_bytes: 10737418240        # 10 GB
+  preferred_residency: "manager_priority"
+  resource_priority: "manager"
+  vram_budget_bytes: 5368709120                  # 5 GB (out of 6 GB VRAM)
+  ram_budget_bytes: 4294967296                   # 4 GB system RAM
+  cpu_core_limit: 8
+
+autonomy:
+  autonomy_tier: 1                               # Tier 1: Safe / Bounded Execution
+  allow_user_override: true
+
+network:
+  network_mode: "BALANCED"                       # LOCAL_ONLY, PREFER_LOCAL, BALANCED, ONLINE_ALLOWED
+  request_timeout_seconds: 30
+  max_retries: 3
+
+channels:
+  desktop_enabled: true
+  whatsapp_enabled: false
+  channel_affinity_enforced: true
+
+notifications:
+  desktop_notifications_enabled: true
+  sound_enabled: false
+  notification_rate_limit_per_minute: 10
+
+memory:
+  retention_policy: "retain_all"                 # retain_all, rolling_window, summarize_old
+  rolling_window_days: 90
+  max_unconsolidated_memories: 1000
+  vector_index_enabled: false
+  temporal_decay_factor: 0.95
+
+logging:
+  log_level: "INFO"                              # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  diagnostic_mode: false
+  retention_days: 30
+  audit_logging_enabled: true
+  performance_telemetry_enabled: false
+
+developer:
+  debug_mode: false
+  verbose_diagnostics: false
+  test_mode: false

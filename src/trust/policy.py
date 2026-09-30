@@ -1,4 +1,4 @@
-"""AEGIS Trust Core -- Deterministic Policy Engine.
+"""SAGE Trust Core -- Deterministic Policy Engine.
 
 Responsibilities:
 - Classify any action by its canonical ActionRisk (LOW/MEDIUM/HIGH/CRITICAL).

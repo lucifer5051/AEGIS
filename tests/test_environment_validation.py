@@ -1,4 +1,4 @@
-"""AEGIS Deterministic Development Environment Validation Test Suite.
+"""SAGE Deterministic Development Environment Validation Test Suite.
 
 Prompt: 005
 Scope: Validates that Python 3.12, isolated virtual environment, core developer tooling,
@@ -161,6 +161,7 @@ def test_13_no_unexpected_application_source():
     src_dir = get_canonical_root() / "src"
     assert src_dir.is_dir(), "src directory missing"
     # In Prompt 019, src/trust/ is authorized in addition to previous modules.
+    # In Prompt 020, src/tools/ (Tool Broker) is authorized.
     allowed_subdirs = {
         "config",
         "hardware",
@@ -169,6 +170,7 @@ def test_13_no_unexpected_application_source():
         "decision",
         "model_policy",
         "trust",
+        "tools",
         "__pycache__",
     }
     for child in src_dir.iterdir():

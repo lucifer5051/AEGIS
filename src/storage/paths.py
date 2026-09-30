@@ -1,4 +1,4 @@
-"""AEGIS Local SQLite Storage Foundation - Path Resolution & Safety Boundaries.
+"""SAGE Local SQLite Storage Foundation - Path Resolution & Safety Boundaries.
 
 Document Reference: docs/specifications/AEGIS_SQLITE_STORAGE_SUBSYSTEM.md
 Constraints:
@@ -18,17 +18,21 @@ from src.storage.errors import ForbiddenDatabaseLocationError
 CANONICAL_RECOVERY_ROOT = Path("C:/AEGIS").resolve()
 
 
-def get_default_aegis_home() -> Path:
-    """Return root AEGIS local home directory (%USERPROFILE%\\.aegis)."""
-    override = os.environ.get("AEGIS_HOME")
+def get_default_sage_home() -> Path:
+    """Return root SAGE local home directory (%USERPROFILE%\\.aegis as legacy/current storage)."""
+    override = os.environ.get("SAGE_HOME") or os.environ.get("AEGIS_HOME")
     if override:
         return Path(override).resolve()
     return (Path.home() / ".aegis").resolve()
 
 
+# Backward compatibility alias
+get_default_aegis_home = get_default_sage_home
+
+
 def get_default_data_dir() -> Path:
     """Return local data directory for persistent databases."""
-    return get_default_aegis_home() / "data"
+    return get_default_sage_home() / "data"
 
 
 def get_default_db_path() -> Path:

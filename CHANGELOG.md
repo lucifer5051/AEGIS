@@ -1,14 +1,130 @@
-# AEGIS — Changelog
+# SAGE — Changelog
 
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
+
+## [Prompt 020] — 2026-10-01
+
+### Project Identity Migration (AEGIS → SAGE) + Tool Broker & Sandboxed Execution Foundation
+
+**Status:** IMPLEMENTED & VERIFIED — Full SAGE identity migration across all active source files,
+Tool Broker architecture with Trust Core integration, subprocess sandbox, output sanitization,
+and comprehensive test suite.  
+**Tests:** 327 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~15s) — 46 new Tool Broker tests (`test_tool_broker.py`)  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (67 files)  
+**Type Check:** `mypy` — 0 issues (65 source files)  
+
+#### A. SAGE Identity Migration
+
+**Previous identity:** AEGIS — Autonomous Personal Digital Agent and Epistemic Knowledge Model  
+**Current identity:** SAGE — System for Autonomous Guidance & Execution
+
+- Updated `pyproject.toml` project metadata (name, description, authors).
+- Updated `README.md` project overview and architecture summary.
+- Added `SageConfig` / `SageBaseConfig` aliases in `src/config/models.py` and `src/config/__init__.py`.
+- Added `SAGE_*` environment variable precedence in `src/config/loader.py`; `AEGIS_*` variables
+  retained as legacy compatibility overrides (backward-compatible, documented).
+- Added `get_default_sage_home()` in `src/storage/paths.py` checking `SAGE_HOME` then `AEGIS_HOME`.
+- Created `config/sage.example.yaml` canonical configuration template.
+- Updated module-level docstrings in `src/trust/`, `src/storage/`, `src/model_policy/`,
+  `src/hardware/`, `src/benchmark/`, `src/config/`, `src/decision/`, `tests/`.
+- Updated directory `README.md` headers throughout repository.
+- Added `tests/test_sage_identity.py` — 5 identity compliance tests.
+- Activation scripts (`activate_env.bat`, `activate_env.ps1`) updated to echo SAGE.
+
+**Preserved as historical/compatibility (intentionally unchanged):**
+- `C:\AEGIS` recovery path constant (`src/storage/paths.py:CANONICAL_RECOVERY_ROOT`) — must stay.
+- `%USERPROFILE%\.aegis` runtime home — user data must not be invalidated.
+- `AEGIS_*` environment variable keys in config loader — backward compatibility.
+- `AEGIS_*.md` specification document filenames — historical frozen specs; not renamed.
+- Migration SQL filenames (`0001_`–`0005_*.sql`) — Git history must not be rewritten.
+- Test fixture data strings (`"AEGIS"`, `"Hello AEGIS"`) in `test_domain_schema.py` — valid test data.
+- Physical repository directory `aeigs` — not renamed per explicit user instruction.
+
+#### B. Tool Broker Implementation (`src/tools/`)
+
+Five new modules implementing the full provider-independent Tool Broker:
+
+- **`src/tools/errors.py`**: Fail-closed exception hierarchy (`ToolBrokerError` → registration,
+  argument, execution, authorization, sanitization).
+- **`src/tools/models.py`**: `ToolParameterSchema` (type coercion + bounds validation),
+  `ToolDefinition` (static tool declaration with name regex enforcement), `ToolResult`
+  (uniform return type), `ParamType` enum.
+- **`src/tools/sanitizer.py`**: Best-effort output sanitizer — strips ANSI escapes, enforces 64 KiB
+  / 2000-line limits, redacts AWS keys, bearer tokens, PEM private keys, GitHub tokens,
+  and password/secret/token assignments. **Does NOT guarantee secret-free output; defense
+  in depth only.**
+- **`src/tools/subprocess_runner.py`**: Process-level subprocess wrapper — command allowlist
+  enforcement from `ResourceScope`, `cwd` filesystem scope validation, credential-stripped
+  environment (`_FORWARDED_ENV_KEYS` allowlist), `shell=False` enforced, timeout with
+  `ToolTimeoutError`. **Explicitly NOT an OS-level sandbox** (no seccomp, AppArmor, containers,
+  or Windows Job Objects). This is a process-level guard only.
+- **`src/tools/broker.py`**: Central `ToolBroker` — full 6-step pipeline for every invocation:
+  1. Tool registration lookup (fail-closed on unknown tool)
+  2. Argument schema validation and coercion
+  3. Trust Core capability request (via `TrustAuthority.request_capability`)
+  4. Capability consumption (HMAC, expiry, revocation, scope, use-count checks)
+  5. Sandboxed execution (inline handler or subprocess runner)
+  6. Output sanitization before return
+  Scope widening via override is rejected (fail-closed). All failures return `ToolResult`;
+  exceptions never propagate to callers.
+- **`src/tools/__init__.py`**: Public API surface.
+
+#### C. Trust Core Integration
+
+Tool Broker requires a `TrustAuthority` instance at construction time. Every `invoke()` call:
+- Requests a capability for the tool's declared `action_name` and `ResourceScope`.
+- Consumes the capability (single-use, 60 s TTL default) immediately before execution.
+- Audit records are written for every ALLOW/DENY/ESCALATE decision by the Trust Core.
+- Any `TrustError` (deny, approval required, capability lifecycle failure) → `ToolResult.denied`.
+
+#### D. Security Review (verified before commit)
+
+| Check | Status |
+|---|---|
+| Tool Broker cannot bypass TrustAuthority | ✅ Every invoke() path requests + consumes capability |
+| Unknown tools fail closed | ✅ Returns ToolResult.error (ToolNotFoundError) |
+| Invalid arguments fail closed | ✅ Returns ToolResult.error before auth check |
+| Arbitrary shell execution impossible via broker | ✅ shell=False enforced; command allowlist required |
+| shell=False enforced | ✅ subprocess_runner.py:134 |
+| Executable allowlist enforced | ✅ ResourceScope.allowed_process_commands checked |
+| cwd/resource scope enforced | ✅ realpath + scope.contains_path() |
+| Environment credentials stripped | ✅ _FORWARDED_ENV_KEYS allowlist; no credential keys forwarded |
+| Output bounded and sanitized | ✅ 64 KiB / 2000-line limits + secret pattern redaction |
+| Tool output treated as untrusted | ✅ Always passes through sanitize_output() |
+| Trust Core auth failure prevents execution | ✅ Capability consumed before execute(); any failure → DENIED |
+| OS-level sandboxing NOT falsely claimed | ✅ Explicitly documented as process-level only |
+
+#### E. Test Suite (`tests/test_tool_broker.py`)
+
+46 new tests across 6 classes:
+- `TestToolParameterSchema` (11): type coercion, bounds, allowed_values, bad type.
+- `TestToolDefinition` (5): name validation, missing args, unknown keys, optional params, zero timeout.
+- `TestToolResult` (4): success/error/denied/timeout constructors.
+- `TestSanitizeOutput` (8): ANSI stripping, AWS/bearer/PEM/GitHub/password redaction, truncation, passthrough.
+- `TestToolBrokerRegistration` (6): inline/subprocess registration, duplicate, no-handler, both-handlers errors.
+- `TestToolBrokerInvoke` (9): success, unknown tool, missing arg, policy denial, scope widening rejection,
+  scope narrowing allowed, output sanitization, handler exception, subprocess sandbox.
+- `TestSubprocessRunner` (3): command not in allowlist, empty command, allowed command runs.
+
+#### F. Files Created
+
+- `src/tools/__init__.py`
+- `src/tools/errors.py`
+- `src/tools/models.py`
+- `src/tools/sanitizer.py`
+- `src/tools/subprocess_runner.py`
+- `src/tools/broker.py`
+- `tests/test_tool_broker.py`
+- `config/sage.example.yaml`
+- `tests/test_sage_identity.py`
 
 ## [Prompt 019] — 2026-10-01
 
 ### Deterministic Authority Layer & Trust Core Foundation
 
 **Status:** IMPLEMENTED & VERIFIED — Full deterministic Trust Core foundation, HMAC-SHA256 capability tokens, fail-closed policy engine, append-only SQLite audit writer with zero-secret invariant, and schema migration 0005.  
-**Tests:** 275 passed · 0 failed · 0 skipped (100% offline inside AEGIS venv, 14.80s) — 51 new comprehensive adversarial & functional tests (`test_trust_core.py`)  
+**Tests:** 275 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, 14.80s) — 51 new comprehensive adversarial & functional tests (`test_trust_core.py`)  
 **Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (59 files)  
 **Type Check:** `mypy` — 0 issues (57 source files)  
 **Commit:** `4d47e72`
@@ -70,7 +186,7 @@ Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 ### Controlled Model Provisioning & Empirical Hardware Qualification (Outcome B: Safe Defer)
 
 **Status:** SAFE DEFER (Outcome B) — Storage preflight passed; model loading safely deferred due to non-negotiable host RAM reserve gate  
-**Tests:** 224 passed · 0 failed · 0 skipped (100% offline inside AEGIS venv, 14.63s)  
+**Tests:** 224 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, 14.63s)  
 **Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (52 files)  
 **Type Check:** `mypy` — 0 issues (50 source files)  
 
@@ -126,7 +242,7 @@ Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 ### Model Manifest Reconciliation & Provisioning Gate (Outcome B: Safe Stop)
 
 **Status:** SAFE STOP — Manifest fully reconciled; live model loading deferred (host RAM headroom insufficient)  
-**Tests:** 220 passed · 0 failed · 0 skipped (100 % offline inside AEGIS venv, 17.05s)  
+**Tests:** 220 passed · 0 failed · 0 skipped (100 % offline inside SAGE venv, 17.05s)  
 **Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (52 files)  
 **Type Check:** `mypy` — 0 issues (50 source files)
 
@@ -200,7 +316,7 @@ Model provisioning (download + load) is deferred. The manifest reconciliation is
 ### Phase 3: Hardware Qualification & Model Provisioning (Stop Condition Reached)
 
 **Status:** STOP CONDITION REACHED — Manifest checksum discrepancy & host memory limitation  
-**Tests:** 220 passed · 0 failed · 0 skipped (100 % offline inside AEGIS venv)  
+**Tests:** 220 passed · 0 failed · 0 skipped (100 % offline inside SAGE venv)  
 **Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (52 files)  
 **Type Check:** `mypy` — 0 errors (50 source files)
 

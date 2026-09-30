@@ -1,4 +1,4 @@
-"""Storage I/O throughput and latency benchmark for AEGIS-controlled directories."""
+"""Storage I/O throughput and latency benchmark for SAGE-controlled directories."""
 
 import os
 import time
@@ -15,7 +15,7 @@ def run_storage_benchmark(
     cancel_check: Optional[Callable[[], bool]] = None,
     timeout_sec: float = 10.0,
 ) -> PhaseResult:
-    """Execute safe, bounded storage I/O benchmark inside an AEGIS scratch directory."""
+    """Execute safe, bounded storage I/O benchmark inside a SAGE scratch directory."""
     start_wall = time.perf_counter()
     warnings: List[str] = []
 

@@ -1,4 +1,4 @@
-"""AEGIS Fast Decision Engine - Von Provider Unit Test Suite.
+"""SAGE Fast Decision Engine - Von Provider Unit Test Suite.
 
 Prompt: 014A
 Scope: Validates Von provider pinning, storage boundary safety, manifest checksum verification,

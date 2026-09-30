@@ -1,4 +1,4 @@
-"""AEGIS Local SQLite Storage Foundation - Domain Exceptions.
+"""SAGE Local SQLite Storage Foundation - Domain Exceptions.
 
 Document Reference: docs/specifications/AEGIS_SQLITE_STORAGE_SUBSYSTEM.md
 Constraints:
@@ -9,7 +9,7 @@ Constraints:
 
 
 class StorageError(Exception):
-    """Base exception for all AEGIS storage foundation operations."""
+    """Base exception for all SAGE storage foundation operations."""
 
 
 class ForbiddenDatabaseLocationError(StorageError):

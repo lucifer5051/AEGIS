@@ -1,4 +1,4 @@
-"""AEGIS Model Runtime Registry - Framework Deduplication & Inventory.
+"""SAGE Model Runtime Registry - Framework Deduplication & Inventory.
 
 Maintains an authoritative registry of framework runtimes (PyTorch, ONNX, llama.cpp)
 and models. Prevents duplicate accounting when multiple models share a single runtime.

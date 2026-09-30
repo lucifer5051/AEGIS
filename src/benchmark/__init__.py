@@ -1,4 +1,4 @@
-"""AEGIS Hardware Benchmark Subsystem.
+"""SAGE Hardware Benchmark Subsystem.
 
 Deterministic, controlled hardware benchmarking characterizing CPU, RAM, GPU,
 storage, and resource pressure to transition hardware profiles from

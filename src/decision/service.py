@@ -1,4 +1,4 @@
-"""AEGIS Fast Decision Engine - Service & Orchestration Layer.
+"""SAGE Fast Decision Engine - Service & Orchestration Layer.
 
 Document Reference: docs/specifications/AEGIS_FAST_DECISION_ENGINE.md
 Constraints:
@@ -60,8 +60,7 @@ CANONICAL_INTENT_CRITERIA: Dict[DecisionRoute, str] = {
         "via configured external channels."
     ),
     DecisionRoute.SETTINGS_INTENT: (
-        "Modifying AEGIS configuration parameters, runtime policies, "
-        "log levels, or system settings."
+        "Modifying SAGE configuration parameters, runtime policies, log levels, or system settings."
     ),
     DecisionRoute.REASONING_INTENT: (
         "Complex problem analysis, architectural design, "

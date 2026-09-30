@@ -1,30 +1,33 @@
-# AEGIS
+# SAGE
+## System for Autonomous Guidance & Execution
 
-AEGIS is a local-first personal autonomous agent designed to manage and assist with a user's digital environment through modular skills, controlled workflows, machine-first memory, adaptive configuration, and deterministic security boundaries.
+SAGE is a personal autonomous AI system that understands user goals, plans and executes tasks, manages context and memory, coordinates skills and tools, and operates within deterministic security and permission boundaries.
+
+*(Formerly AEGIS — transitioned in Prompt 020 to better represent the unified autonomous guidance & execution architecture)*
 
 ---
 
 ## Overview
 
-AEGIS is being developed as a unified, cohesive personal agent rather than a collection of disconnected assistants or ad-hoc scripts. It orchestrates digital life tasks, coordinates multi-step workflows, maintains long-term contextual memory, and interacts with local and external tools under strict governance.
+SAGE is being developed as a unified, cohesive personal agent rather than a collection of disconnected assistants or ad-hoc scripts. It orchestrates digital life tasks, coordinates multi-step workflows, maintains long-term contextual memory, and interacts with local and external tools under strict governance.
 
 The conceptual architecture flows hierarchically:
 
 ```
 User
   ↓
-Personal Agent (Unified Supervisor)
+Personal Agent (Unified Supervisor / Manager)
   ↓
 Computer / Accounts / Workflows
   ↓
-Intelligence + Tools
+Intelligence + Tools (Skills, Tool Broker, Decision Engine)
   ↓
-Memory + Context
+Memory + Context (EKM, SQLite WAL, Context IR)
   ↓
-Security / Permissions (Deterministic Boundary)
+Security / Permissions (Deterministic Trust Core Boundary)
 ```
 
-The fundamental architectural principle governing AEGIS is:
+The fundamental architectural principle governing SAGE is:
 
 > **"Intelligence proposes; deterministic authority decides."**
 
@@ -68,7 +71,7 @@ Language models generate plans, interpret intentions, and draft actions. However
 
 ## Architecture
 
-AEGIS is structured around modular, loosely coupled subsystems operating under centralized supervision:
+SAGE is structured around modular, loosely coupled subsystems operating under centralized supervision:
 
 - **Manager / Supervisor**: The central coordinator responsible for task triage, planning, step verification, resource allocation, and workflow sequencing.
 - **Skills Architecture**: Modular execution units exposing typed actions, inputs, and outputs. Skills encapsulate specialized operational capabilities without bypassing security boundaries.
@@ -82,21 +85,21 @@ AEGIS is structured around modular, loosely coupled subsystems operating under c
 
 ## Security Model
 
-Security in AEGIS is founded on the separation between probabilistic generation and deterministic authorization:
+Security in SAGE is founded on the separation between probabilistic generation and deterministic authorization:
 
-- **Deterministic Trust Core** (*Designed*): Non-bypassable security kernel enforcing authorization policies before any side-effecting action occurs.
-- **Least Privilege** (*Designed*): Every skill and workflow operates under minimal required permissions.
-- **Capability-Based Authorization** (*Designed*): Actions require explicit capability grants rather than broad ambient authority.
-- **Fail-Closed Behavior** (*Designed*): Unrecognized actions, malformed inputs, or ambiguous policies default to immediate rejection.
+- **Deterministic Trust Core** (*Implemented*): Non-bypassable security kernel enforcing authorization policies before any side-effecting action occurs.
+- **Least Privilege** (*Implemented*): Every skill and workflow operates under minimal required permissions.
+- **Capability-Based Authorization** (*Implemented*): Actions require explicit capability grants rather than broad ambient authority.
+- **Fail-Closed Behavior** (*Implemented*): Unrecognized actions, malformed inputs, or ambiguous policies default to immediate rejection.
 - **Credential Isolation** (*Designed*): Secrets, tokens, and keys reside strictly within encrypted vaults managed by Trust Core; configuration and logs maintain a strict zero-secret invariant.
 - **Network Policy Enforcement** (*Designed*): Declarative network modes (`LOCAL_ONLY`, `PREFER_LOCAL`, `BALANCED`, `ONLINE_ALLOWED`) enforced deterministically at runtime.
-- **Auditability** (*Designed / Schema Specified*): Comprehensive, tamper-evident audit logging for all tool executions, approvals, and security events.
+- **Auditability** (*Implemented / Schema Migration 0005*): Comprehensive, tamper-evident audit logging for all tool executions, approvals, and security events.
 
 ---
 
 ## Memory / Second Brain
 
-The AEGIS memory architecture treats memory as a durable, structured, machine-first knowledge asset:
+The SAGE memory architecture treats memory as a durable, structured, machine-first knowledge asset:
 
 - **Structured Records**: Relational schema capturing discrete facts, task histories, workflow states, and user preferences.
 - **Temporal Memory**: Time-indexed records with validity windows and supersession tracking.
@@ -109,7 +112,7 @@ The AEGIS memory architecture treats memory as a durable, structured, machine-fi
 
 ## Hardware Awareness
 
-AEGIS dynamically inspects and understands the host machine to make informed execution decisions:
+SAGE dynamically inspects and understands the host machine to make informed execution decisions:
 
 - **Read-Only Inspection**: Hardware detection queries static system properties and point-in-time metrics without running invasive tests.
 - **Hardware Profile**: Validated data structure representing CPU topology, physical/available RAM, discrete and integrated GPUs, storage volumes, OS build, and runtime environments.
@@ -126,7 +129,7 @@ Detection discovers what hardware exists; benchmarking (Phase 3) measures how th
 ## Development Environment
 
 - **Primary Target**: Windows 11 (64-bit)
-- **Runtime**: Python 3.12 (`%USERPROFILE%\.aegis\venv`)
+- **Runtime**: Python 3.12 (`%USERPROFILE%\.aegis\venv` — legacy runtime path preserved for compatibility)
 - **Type Checking**: `mypy` (strict configuration)
 - **Linting & Formatting**: `ruff` (line-length 100, strict checks)
 - **Testing**: `pytest` (100% offline test execution)
@@ -141,12 +144,15 @@ aeigs/
 ├── docs/               # Technical specifications and architectural documents
 │   ├── architecture/   # Cross-subsystem data relationship architectures
 │   └── specifications/ # Foundational, schema, config, and hardware specs
-├── src/                # Core AEGIS source code
+├── src/                # Core SAGE source code
 │   ├── config/         # Declarative configuration subsystem & schemas
 │   ├── hardware/       # Read-only hardware profile detection subsystem
 │   ├── decision/       # Fast Decision Engine (intent → action pipeline)
 │   │   └── providers/  # Local model provider backends
-│   └── model_policy/   # Model resource policy & skill concurrency engine
+│   ├── model_policy/   # Model resource policy & skill concurrency engine
+│   ├── storage/        # Local SQLite storage engine & migrations
+│   ├── trust/          # Deterministic Trust Core & authorization authority
+│   └── tools/          # Tool Broker & sandboxed subprocess execution
 ├── tests/              # Deterministic test suites (offline validation)
 ├── schemas/            # Canonical JSON schemas and manifest definitions
 ├── config/             # Example configuration templates (zero-secret)

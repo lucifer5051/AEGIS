@@ -1,4 +1,4 @@
-"""AEGIS Live Hardware Benchmark Probe.
+"""SAGE Live Hardware Benchmark Probe.
 
 Provides deterministic, read-only inspection of live host memory (RAM via Windows
 GlobalMemoryStatusEx and GPU VRAM via nvidia-smi). Used by the SkillConcurrencyManager

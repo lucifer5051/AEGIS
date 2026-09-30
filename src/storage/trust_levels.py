@@ -1,4 +1,4 @@
-"""AEGIS Frozen Memory Trust Levels (M0 to M4).
+"""SAGE Frozen Memory Trust Levels (M0 to M4).
 
 Document Reference:
 - docs/specifications/AEGIS_DATABASE_SCHEMA_ARCHITECTURE.md §4.1
@@ -20,7 +20,7 @@ from typing import Dict
 
 
 class MemoryTrustLevel(str, Enum):
-    """Frozen canonical AEGIS memory trust levels (M0 to M4)."""
+    """Frozen canonical SAGE memory trust levels (M0 to M4)."""
 
     M0 = "M0"
     M1 = "M1"

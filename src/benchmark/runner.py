@@ -1,4 +1,4 @@
-"""Orchestrator for the AEGIS Hardware Benchmark Subsystem."""
+"""Orchestrator for the SAGE Hardware Benchmark Subsystem."""
 
 import os
 import time

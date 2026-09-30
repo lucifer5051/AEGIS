@@ -1,4 +1,4 @@
-"""AEGIS Local SQLite Storage Foundation - Connection & Transaction Management.
+"""SAGE Local SQLite Storage Foundation - Connection & Transaction Management.
 
 Document Reference: docs/specifications/AEGIS_SQLITE_STORAGE_SUBSYSTEM.md
 Constraints:

@@ -1,3 +1,3 @@
-﻿# AEGIS Diagnostics
+﻿# SAGE Diagnostics
 
 System health verification, environment auditing, and diagnostic probes.

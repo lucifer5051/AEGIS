@@ -1,4 +1,4 @@
-"""Deterministic statistical utilities for AEGIS benchmark repetitions."""
+"""Deterministic statistical utilities for SAGE benchmark repetitions."""
 
 import math
 from typing import List

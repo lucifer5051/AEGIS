@@ -1,4 +1,4 @@
-"""Comprehensive Unit Tests for AEGIS Model Resource Policy & Skill Concurrency.
+"""Comprehensive Unit Tests for SAGE Model Resource Policy & Skill Concurrency.
 
 Covers:
 - ModelRuntimeRegistry deduplication and inventory

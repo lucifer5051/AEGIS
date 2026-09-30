@@ -1,6 +1,6 @@
-"""AEGIS Trust Core -- Deterministic Trust Authority.
+"""SAGE Trust Core -- Deterministic Trust Authority.
 
-This is the single public interface for all authorization decisions in AEGIS.
+This is the single public interface for all authorization decisions in SAGE.
 
 Core invariants (from spec section 17 and principle "Intelligence proposes;
 deterministic authority decides"):
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 class TrustAuthority:
-    """Central deterministic authorization authority for AEGIS.
+    """Central deterministic authorization authority for SAGE.
 
     All capability issuance and authorization runs through this class.
     It composes:

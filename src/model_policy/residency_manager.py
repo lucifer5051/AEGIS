@@ -1,4 +1,4 @@
-"""AEGIS Model Residency Manager - Shared Model Lifecycle & Protection.
+"""SAGE Model Residency Manager - Shared Model Lifecycle & Protection.
 
 Manages model residency in system RAM/VRAM. Enables multiple concurrent skills
 to share a single resident model instance without duplicate allocations.

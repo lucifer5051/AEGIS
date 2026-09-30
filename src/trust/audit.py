@@ -1,4 +1,4 @@
-"""AEGIS Trust Core -- Append-Only Audit Log Writer.
+"""SAGE Trust Core -- Append-Only Audit Log Writer.
 
 Zero-Secret Invariant: This module MUST NEVER write passwords, OAuth tokens,
 API keys, encryption keys, or raw user prompts to the audit log.

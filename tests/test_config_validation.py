@@ -1,4 +1,4 @@
-"""AEGIS Declarative Configuration Subsystem - Deterministic Unit Tests.
+"""SAGE Declarative Configuration Subsystem - Deterministic Unit Tests.
 
 Prompt: 006
 Scope: Validates typed configuration models, deterministic loading, precedence ordering,
@@ -221,3 +221,30 @@ def test_17_effective_configuration_is_reproducible(example_yaml_path: Path):
     cfg1 = load_config(config_file=example_yaml_path, apply_env_overrides=False)
     cfg2 = load_config(config_file=example_yaml_path, apply_env_overrides=False)
     assert cfg1.model_dump() == cfg2.model_dump()
+
+
+def test_18_sage_environment_overrides_and_aliases(monkeypatch):
+    """Verify SAGE canonical naming, SageConfig alias, and SAGE_* env precedence."""
+    from src.config import SageBaseConfig, SageConfig
+
+    # 1. Alias parity
+    assert SageConfig is AegisConfig
+    assert issubclass(SageConfig, SageBaseConfig)
+
+    # 2. SAGE_* overrides work
+    monkeypatch.setenv("SAGE_ENVIRONMENT", "staging")
+    monkeypatch.setenv("SAGE_LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("SAGE_NETWORK_MODE", "LOCAL_ONLY")
+    monkeypatch.setenv("SAGE_AUTONOMY_TIER", "2")
+
+    cfg = load_config(apply_env_overrides=True)
+    assert cfg.system.environment == "staging"
+    assert cfg.logging.log_level == "DEBUG"
+    assert cfg.network.network_mode == NetworkMode.LOCAL_ONLY
+    assert cfg.autonomy.autonomy_tier == AutonomyTier.TIER_2_SUPERVISED
+
+    # 3. SAGE_* takes precedence over legacy AEGIS_* if both are provided
+    # (Should be overridden by SAGE_ENVIRONMENT)
+    monkeypatch.setenv("AEGIS_ENVIRONMENT", "production")
+    cfg_both = load_config(apply_env_overrides=True)
+    assert cfg_both.system.environment == "staging"

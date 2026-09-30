@@ -1,4 +1,4 @@
-"""AEGIS Trust Core -- Public API Surface.
+"""SAGE Trust Core -- Public API Surface.
 
 "Intelligence proposes; deterministic authority decides."
 

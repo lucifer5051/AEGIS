@@ -1,4 +1,4 @@
-"""AEGIS Domain Schema Foundation Tests.
+"""SAGE Domain Schema Foundation Tests.
 
 Covers: projects, memory_evidence, memory_facts, user_preferences,
         entities, entity_relationships, conversations, messages.

@@ -1,4 +1,4 @@
-"""AEGIS Model Hardware Qualification Subsystem.
+"""SAGE Model Hardware Qualification Subsystem.
 
 Implements the trusted manifest requirement:
 "hardware_qualification": "MEASURED_PROBE_LOAD_AND_LATENCY"

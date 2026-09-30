@@ -1,4 +1,4 @@
-"""AEGIS Fast Decision Engine - Providers Package.
+"""SAGE Fast Decision Engine - Providers Package.
 
 Document Reference: docs/specifications/AEGIS_FAST_DECISION_ENGINE.md
 """

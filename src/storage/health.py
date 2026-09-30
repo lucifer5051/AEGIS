@@ -1,4 +1,4 @@
-"""AEGIS Local SQLite Storage Foundation - Deterministic Database Health Probes.
+"""SAGE Local SQLite Storage Foundation - Deterministic Database Health Probes.
 
 Document Reference: docs/specifications/AEGIS_SQLITE_STORAGE_SUBSYSTEM.md
 Constraints:

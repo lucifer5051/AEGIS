@@ -1,4 +1,4 @@
-"""AEGIS Model Resource Policy & Skill Concurrency Subsystem."""
+"""SAGE Model Resource Policy & Skill Concurrency Subsystem."""
 
 from src.model_policy.concurrency_manager import SkillConcurrencyManager
 from src.model_policy.live_benchmark import LiveHardwareBenchmark

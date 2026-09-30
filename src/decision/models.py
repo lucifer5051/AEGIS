@@ -1,4 +1,4 @@
-"""AEGIS Fast Decision Engine - Domain Models.
+"""SAGE Fast Decision Engine - Domain Models.
 
 Document Reference: docs/specifications/AEGIS_FAST_DECISION_ENGINE.md
 Constraints:

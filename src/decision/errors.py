@@ -1,4 +1,4 @@
-"""AEGIS Fast Decision Engine - Domain Exceptions.
+"""SAGE Fast Decision Engine - Domain Exceptions.
 
 Document Reference: docs/specifications/AEGIS_FAST_DECISION_ENGINE.md
 Constraints:

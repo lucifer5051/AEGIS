@@ -1,4 +1,4 @@
-"""AEGIS Local SQLite Storage Foundation - Deterministic Migration Framework.
+"""SAGE Local SQLite Storage Foundation - Deterministic Migration Framework.
 
 Document Reference: docs/specifications/AEGIS_SQLITE_STORAGE_SUBSYSTEM.md
 Constraints:

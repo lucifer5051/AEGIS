@@ -1,4 +1,4 @@
-"""AEGIS Model Resource Policy & Skill Concurrency - Data Models.
+"""SAGE Model Resource Policy & Skill Concurrency - Data Models.
 
 Defines typed schemas for runtimes, model artifacts, empirical hardware qualification,
 per-skill resource descriptors, active skill execution leases, and storage budgeting.

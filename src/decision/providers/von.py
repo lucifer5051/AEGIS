@@ -1,4 +1,4 @@
-"""AEGIS Fast Decision Engine - Von Provider (Option-Marker Backend).
+"""SAGE Fast Decision Engine - Von Provider (Option-Marker Backend).
 
 Document Reference: docs/specifications/AEGIS_FAST_DECISION_ENGINE.md
 Constraints:

@@ -1,6 +1,6 @@
-"""AEGIS Skill Concurrency Manager - Dynamic Admission & Shared Residency Control.
+"""SAGE Skill Concurrency Manager - Dynamic Admission & Shared Residency Control.
 
-Enforces the AEGIS architectural target of 2–3 concurrent skills.
+Enforces the SAGE architectural target of 2–3 concurrent skills.
 Calculates admission decisions dynamically using:
 1. Live hardware measurements (LiveHardwareBenchmark).
 2. Empirically measured resident and marginal memory (ModelHardwareQualificationProfile).

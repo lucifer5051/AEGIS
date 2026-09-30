@@ -1,4 +1,4 @@
-"""AEGIS Declarative Configuration Subsystem - Deterministic Loader.
+"""SAGE Declarative Configuration Subsystem - Deterministic Loader.
 
 Document Reference: docs/specifications/AEGIS_CONFIGURATION_SUBSYSTEM.md
 Implements:
@@ -21,7 +21,7 @@ from .models import AegisConfig
 
 
 class ConfigurationError(Exception):
-    """Base exception for AEGIS configuration loading and validation failures."""
+    """Base exception for SAGE configuration loading and validation failures."""
 
     def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
         super().__init__(message)
@@ -60,22 +60,24 @@ def _parse_env_var_value(val_str: str) -> Any:
 
 
 def get_env_overrides() -> Dict[str, Any]:
-    """Extract and map AEGIS_* environment variables into a nested configuration dict.
+    """Extract and map SAGE_* (canonical) and AEGIS_* (legacy) environment variables.
 
+    Canonical SAGE mappings take precedence over legacy AEGIS mappings.
     Supported explicit mappings:
-    - AEGIS_ENVIRONMENT -> system.environment
-    - AEGIS_CONFIG_VERSION -> system.config_version
-    - AEGIS_LOG_LEVEL -> logging.log_level
-    - AEGIS_NETWORK_MODE -> network.network_mode
-    - AEGIS_AUTONOMY_TIER -> autonomy.autonomy_tier
-    - AEGIS_DEBUG_MODE -> developer.debug_mode
-    - AEGIS_TEST_MODE -> developer.test_mode
-    - AEGIS_DESKTOP_ENABLED -> channels.desktop_enabled
-    - AEGIS_WHATSAPP_ENABLED -> channels.whatsapp_enabled
+    - SAGE_ENVIRONMENT / AEGIS_ENVIRONMENT -> system.environment
+    - SAGE_CONFIG_VERSION / AEGIS_CONFIG_VERSION -> system.config_version
+    - SAGE_LOG_LEVEL / AEGIS_LOG_LEVEL -> logging.log_level
+    - SAGE_NETWORK_MODE / AEGIS_NETWORK_MODE -> network.network_mode
+    - SAGE_AUTONOMY_TIER / AEGIS_AUTONOMY_TIER -> autonomy.autonomy_tier
+    - SAGE_DEBUG_MODE / AEGIS_DEBUG_MODE -> developer.debug_mode
+    - SAGE_TEST_MODE / AEGIS_TEST_MODE -> developer.test_mode
+    - SAGE_DESKTOP_ENABLED / AEGIS_DESKTOP_ENABLED -> channels.desktop_enabled
+    - SAGE_WHATSAPP_ENABLED / AEGIS_WHATSAPP_ENABLED -> channels.whatsapp_enabled
     """
     overrides: Dict[str, Any] = {}
 
-    mapping = {
+    # Legacy AEGIS mappings first (so SAGE_* overrides them if both exist)
+    legacy_mapping = {
         "AEGIS_ENVIRONMENT": ("system", "environment"),
         "AEGIS_CONFIG_VERSION": ("system", "config_version"),
         "AEGIS_LOG_LEVEL": ("logging", "log_level"),
@@ -87,7 +89,27 @@ def get_env_overrides() -> Dict[str, Any]:
         "AEGIS_WHATSAPP_ENABLED": ("channels", "whatsapp_enabled"),
     }
 
-    for env_name, path in mapping.items():
+    canonical_mapping = {
+        "SAGE_ENVIRONMENT": ("system", "environment"),
+        "SAGE_CONFIG_VERSION": ("system", "config_version"),
+        "SAGE_LOG_LEVEL": ("logging", "log_level"),
+        "SAGE_NETWORK_MODE": ("network", "network_mode"),
+        "SAGE_AUTONOMY_TIER": ("autonomy", "autonomy_tier"),
+        "SAGE_DEBUG_MODE": ("developer", "debug_mode"),
+        "SAGE_TEST_MODE": ("developer", "test_mode"),
+        "SAGE_DESKTOP_ENABLED": ("channels", "desktop_enabled"),
+        "SAGE_WHATSAPP_ENABLED": ("channels", "whatsapp_enabled"),
+    }
+
+    for env_name, path in legacy_mapping.items():
+        if env_name in os.environ:
+            val = _parse_env_var_value(os.environ[env_name])
+            domain, field = path
+            if domain not in overrides:
+                overrides[domain] = {}
+            overrides[domain][field] = val
+
+    for env_name, path in canonical_mapping.items():
         if env_name in os.environ:
             val = _parse_env_var_value(os.environ[env_name])
             domain, field = path

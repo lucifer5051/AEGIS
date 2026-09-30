@@ -1,4 +1,4 @@
-"""Deterministic CPU micro-benchmark for AEGIS resource characterization."""
+"""Deterministic CPU micro-benchmark for SAGE resource characterization."""
 
 import hashlib
 import os

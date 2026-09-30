@@ -1,4 +1,4 @@
-"""AEGIS Fast Decision Engine - Service & Orchestration Test Suite.
+"""SAGE Fast Decision Engine - Service & Orchestration Test Suite.
 
 Prompt: 014A
 Scope: Validates provider abstraction, service orchestration, hard token budget ceiling (2048),

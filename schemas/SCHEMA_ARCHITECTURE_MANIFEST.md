@@ -1,4 +1,4 @@
-# AEGIS Schema Architecture Manifest
+﻿# SAGE Schema Architecture Manifest
 
 **Manifest Version**: 1.0.0-FROZEN-SCHEMA-SPEC  
 **Generated Date**: 2026-09-17  
@@ -10,7 +10,7 @@
 
 ## 1. Relational Persistence Target
 * **Database Engine**: Embedded SQLite 3.40+ (Standalone, zero-server architecture).
-* **Third-Party Server Independence**: Host services (MongoDB, MySQL) are explicitly **not** AEGIS dependencies.
+* **Third-Party Server Independence**: Host services (MongoDB, MySQL) are explicitly **not** SAGE dependencies.
 * **Mandatory PRAGMA Settings**:
   * `PRAGMA foreign_keys = ON;` (Strict referential integrity enforcement on every connection).
   * `PRAGMA journal_mode = WAL;` (Write-Ahead Logging for high concurrency and crash resilience).

@@ -1,4 +1,4 @@
-"""AEGIS Fast Decision Engine - Evaluation & Qualification Datasets.
+"""SAGE Fast Decision Engine - Evaluation & Qualification Datasets.
 
 Document Reference: docs/specifications/AEGIS_FAST_DECISION_ENGINE.md
 Constraints:

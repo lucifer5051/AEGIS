@@ -1,4 +1,4 @@
-"""AEGIS Local SQLite Storage Foundation - Deterministic Unit & Smoke Tests.
+"""SAGE Local SQLite Storage Foundation - Deterministic Unit & Smoke Tests.
 
 Prompt: 011
 Scope: Validates path safety boundaries, connection lifecycle, PRAGMA policies,

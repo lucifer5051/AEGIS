@@ -1,4 +1,4 @@
-"""AEGIS Configuration Subsystem Public API."""
+"""SAGE Configuration Subsystem Public API."""
 
 from .loader import ConfigurationError, get_env_overrides, load_config
 from .models import (
@@ -22,6 +22,8 @@ from .models import (
     ProvisioningPolicyConfig,
     RAMProfile,
     RuntimeProfile,
+    SageBaseConfig,
+    SageConfig,
     StorageDriveProfile,
     StoragePolicyConfig,
     SystemConfig,
@@ -49,6 +51,8 @@ __all__ = [
     "ProvisioningPolicyConfig",
     "RAMProfile",
     "RuntimeProfile",
+    "SageBaseConfig",
+    "SageConfig",
     "StorageDriveProfile",
     "StoragePolicyConfig",
     "SystemConfig",

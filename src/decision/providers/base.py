@@ -1,4 +1,4 @@
-"""AEGIS Fast Decision Engine - Provider Abstraction Base.
+"""SAGE Fast Decision Engine - Provider Abstraction Base.
 
 Document Reference: docs/specifications/AEGIS_FAST_DECISION_ENGINE.md
 Constraints:

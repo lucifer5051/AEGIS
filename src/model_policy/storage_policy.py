@@ -1,4 +1,4 @@
-"""AEGIS Model Storage Policy - Host Reserve Floor & Global Budget Accounting.
+"""SAGE Model Storage Policy - Host Reserve Floor & Global Budget Accounting.
 
 Enforces strict disk storage boundaries:
 1. Hard host reserve floor (min 40.0 GB free on C: drive).

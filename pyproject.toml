@@ -3,13 +3,13 @@ requires = ["setuptools>=75.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aegis"
+name = "sage"
 version = "0.1.0.dev0"
-description = "AEGIS: Autonomous Personal Digital Agent & Epistemic Knowledge Model"
+description = "SAGE: System for Autonomous Guidance & Execution"
 readme = "README.md"
 requires-python = ">=3.12, <3.13"
 license = { text = "Proprietary" }
-authors = [{ name = "AEGIS Architecture Team" }]
+authors = [{ name = "SAGE Architecture Team" }]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",

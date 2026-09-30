@@ -1,7 +1,7 @@
-"""AEGIS Hardware Profile Detection Subsystem.
+"""SAGE Hardware Profile Detection Subsystem.
 
 Deterministic, read-only hardware inspection producing validated HardwareProfile
-models conforming to the canonical AEGIS architecture.
+models conforming to the canonical SAGE architecture.
 """
 
 from src.hardware.detector import HardwareDetector, detect_hardware_profile
