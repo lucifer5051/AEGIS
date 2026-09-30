@@ -158,7 +158,7 @@ src/storage/paths.py::validate_database_path().
 | 017 | Model manifest reconciliation and provisioning gate | 5303ec2 | 2026-09-30 | Pinned HuggingFace revision `308feac9c5`, fail-closed gate | 224 tests pass |
 | 018 | Model provisioning gate, fail-closed behavior, empirical qualification | f84beac | 2026-10-01 | Qualification gate enforced, memory threshold qualification | 224 tests pass |
 | 019 | Deterministic Authority Layer and Trust Core foundation | 4d47e72 | 2026-10-01 | Capability tokens, policy engine, audit log, migration 0005 | 275 tests pass |
-| **020** | **SAGE Identity Migration + Tool Broker & Sandboxed Execution Foundation** | (pending commit) | **2026-10-01** | **Full SAGE identity migration, Tool Broker subsystem (`src/tools/`), 46 tool tests + 5 identity tests** | **327 tests pass (100% offline, 0 failures)** |
+| **020** | **SAGE Identity Migration + Tool Broker & Sandboxed Execution Foundation** | `54e46b1` | **2026-10-01** | **Full SAGE identity migration, Tool Broker subsystem (`src/tools/`), 46 tool tests + 5 identity tests** | **327 tests pass (100% offline, 0 failures)** |
 
 ---
 
@@ -1054,7 +1054,7 @@ Branch: `main` (9 commits ahead of `origin/main`; do NOT push)
 
 **Status:** IMPLEMENTED & VERIFIED  
 **Implementation Date:** 2026-10-01 02:55 IST  
-**Git Commit:** (pending commit)  
+**Git Commit:** `54e46b1`  
 **Test Suite:** 327 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~14.9s) — 46 new Tool Broker tests (`test_tool_broker.py`) + 5 new SAGE identity tests (`test_sage_identity.py`)  
 **Quality Gates:** `ruff check` (0 errors), `ruff format --check` (clean, 67 files), `mypy` (clean, 65 source files)
 
