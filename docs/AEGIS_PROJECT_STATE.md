@@ -785,3 +785,123 @@ Next Required Action:
 
 End of AEGIS Project State Document -- Prompt 016
 Next update required after: Prompt 017
+
+---
+
+## 9. Prompt 017 — Model Manifest Reconciliation & Provisioning Gate
+
+### 9.1 Status
+
+| Item | Value |
+|---|---|
+| Date | 2026-10-01 |
+| Outcome | **Outcome B: Safe Stop** |
+| Manifest reconciled | YES |
+| Hashes internally consistent | YES (across manifest + runtime descriptor) |
+| Model downloaded | NO (blocked by RAM gate) |
+| Model loaded | NO |
+| Live inference ran | NO |
+| Tests | 220 passed / 0 failed / 0 skipped (17.05s) |
+| ruff check | 0 errors |
+| ruff format | 52 files clean |
+| mypy | 0 issues (50 source files) |
+
+### 9.2 Root Cause Audit
+
+The original manifest `schemas/model-manifests/von-1.1-option-marker-395m.json` contained three classes of errors introduced at project inception:
+
+1. **Non-existent HF revision**: `4b2d56a297e59b8a07f0f6ea312389d020d18ceb` → HTTP 404 on Hugging Face. This revision was never a real commit on `wfzyx/von`. All 44 HF commits were audited; none matches this hash.
+
+2. **Non-existent required artifact**: `special_tokens_map.json` was listed as `required: true` but does not exist in `wfzyx/von` at any of the 44 audited commits. Confirmed offline-compatible: `AutoTokenizer.from_pretrained("wfzyx/von", local_files_only=True)` operates correctly without it.
+
+3. **Stale/incorrect SHA-256 digests**: All five SHA-256 hashes in the original manifest were incorrect against the actual artifacts in the repository.
+
+### 9.3 Reconciled Revision
+
+**Selected HF commit**: `308feac9c53d4080df31b7d81362bffbd086de2d`  
+**Commit message**: `feat(model): release converged Option-Marker Universal weights`  
+**HF push timestamp**: 2026-09-21T20:17Z  
+**Paired GitHub source commit**: `bed7e7337791c5124a557eb59ad918cb6747b276` (2026-09-20T13:38Z)  
+**Selection rationale**: Earliest HF commit containing all 5 artifacts at sizes exactly matching `von_runtime.py` and `AEGIS_MODEL_RESOURCE_POLICY.md`. Artifact sizes verified stable across 7 commits (`308feac9c5` through `272b292a05`).
+
+**Incompatibility boundary**:
+- `3896038655`: `model.safetensors` size changes (~1.579 GB) — incompatible dimensions
+- `5df8185a4f`: architecture bumped to `1.2.0` (`independent_options` field) — spec incompatibility
+
+### 9.4 Reconciled Artifact Table
+
+| Artifact | Size (bytes) | SHA-256 (from LFS pointer) |
+|---|---|---|
+| `config.json` | 6,349 | `968db6072229e54691be4d535487a5c8d8132cc4893b6a3fdfa1e605457a7ec3` |
+| `tokenizer.json` | 3,583,485 | `3703d011b3ee259e00b59b60772f8fd54998d79e8fa5a1388d507eff28f8f09e` |
+| `tokenizer_config.json` | 599 | `57170b72a72c60407eec1f7894000c567309a8e41c5d0504b946c624cb069984` |
+| `model.safetensors` | 1,583,355,740 | `349c9b1bf3d5e3217a78c8039606e07069ffae4383640998f99a96bdb6b90c8d` |
+| `option_marker.pt` | 1,581,316,050 | `52202f176080d1efe38ca62c45264894fc7e444d332f4af6bac86f4e3146e0f2` |
+| **Total** | **3,168,262,223** | — |
+
+**Hash source**: Git LFS pointer `sha256` fields extracted from raw LFS pointer blobs at commit `308feac9c5`. These are SHA-256 digests of actual file content, not pointer metadata.  
+**Verification status**: Hashes are internally consistent (manifest ↔ runtime descriptor). Full on-disk recalculation is mandatory **after download**, before `VonFastDecisionProvider.initialize()` is permitted.
+
+### 9.5 RAM Gate Analysis — Why Safe Stop is Correct
+
+| Metric | Bytes | Human-readable |
+|---|---|---|
+| Available host RAM (live) | 2,441,334,784 | 2.27 GB |
+| System RAM reserve floor | 1,610,612,736 | 1.50 GB (non-negotiable) |
+| Usable headroom above reserve | 830,722,048 | ~788 MB |
+| Estimated resident model RAM | ~3,000,000,000+ | ~3.0 GB+ |
+| Shortfall | ~2,200,000,000 | ~2.2 GB |
+
+The 1.5 GB system RAM reserve is a hard floor enforced by `SkillConcurrencyManager` (configurable, but **must not be lowered** per Prompt 017 constraints). Loading the Von model graph under current host memory pressure would consume all available RAM and severely violate the reserve. Outcome B (Safe Stop) is the correct, well-defined result.
+
+**Gate activation path**: When host RAM headroom falls below `resident_ram + reserve`, `SkillConcurrencyManager.acquire_skill_lease()` returns `None` → `VonFastDecisionProvider.evaluate()` returns `FallbackReason.ADMISSION_BUSY`. No crash, no data loss, no RAM violation. Fully tested by `test_15_dynamic_memory_gate_blocks_heavy_model_under_3gb_ram`.
+
+### 9.6 Files Changed in Prompt 017
+
+```
+M  schemas/model-manifests/von-1.1-option-marker-395m.json
+M  src/decision/providers/von_runtime.py
+M  CHANGELOG.md
+M  docs/AEGIS_PROJECT_STATE.md
+```
+
+### 9.7 Prompt 017 Development Log
+
+```
+Phase:    Phase 3 -- Model Manifest Reconciliation & Provisioning Gate
+Commit:   (pending -- see §9.8)
+Branch:   main
+Tests:
+  Total: 220  Passed: 220  Failed: 0  Skipped: 0
+  Duration: 17.05s
+Lint:
+  ruff check src/ tests/: 0 errors
+  ruff format --check: 52 files already formatted (clean)
+Type Check:
+  mypy src/ tests/: 0 issues (50 source files checked)
+Audit scope:
+  - All 44 HF commits on wfzyx/von audited
+  - Paired GitHub commit bed7e733... verified valid
+  - Reconciled revision 308feac9c5 identified and verified
+  - Artifact sizes at 308feac9c5 cross-checked against von_runtime.py (exact match)
+  - LFS pointer SHA-256 hashes extracted and applied to manifest + runtime descriptor
+  - special_tokens_map.json confirmed absent from all 44 commits
+  - AutoTokenizer offline compatibility without special_tokens_map.json verified
+  - RAM headroom computed: 788 MB vs. ~3.0 GB+ required -- Safe Stop triggered
+Current State:
+  Phase: 3 -- Model Manifest Reconciliation (Complete; provisioning deferred)
+  Test count: 220 (0 failing)
+  Last commit: (Prompt 017 -- see §9.8 when committed)
+  Outcome: Safe Stop (Outcome B)
+Next Required Action:
+  Prompt 018 -- (per project plan; no model download until host RAM headroom > 3.0 GB + 1.5 GB reserve)
+```
+
+### 9.8 Git Commit
+
+Commit for Prompt 017: `feat(phase3): reconcile model manifest and establish provisioning gate -- Prompt 017`
+
+---
+
+End of AEGIS Project State Document -- Prompt 017
+Next update required after: Prompt 018

@@ -2,6 +2,13 @@
 
 Contains verified, manifest-pinned artifact byte sizes and SHA-256 digests
 sourced from the canonical Hugging Face repository tree (wfzyx/von).
+
+Reconciliation (Prompt 017, 2026-10-01):
+  Selected HF revision: 308feac9c53d4080df31b7d81362bffbd086de2d
+  Previous revision (4b2d56a297...) was HTTP 404 on Hugging Face.
+  special_tokens_map.json removed: file does not exist in wfzyx/von at any audited commit.
+  SHA-256 digests sourced from Git LFS pointer records at the reconciled revision.
+  Full on-disk recalculation is required after download before model activation.
 """
 
 from typing import Dict
@@ -25,13 +32,15 @@ VON_FILES_BY_SIZE: Dict[str, int] = {
 
 VON_EXACT_ARTIFACT_BYTES: int = sum(VON_FILES_BY_SIZE.values())  # Exactly 3,168,262,223 bytes
 
+# Reconciled at Prompt 017: hashes extracted from LFS pointer records at
+# HF commit 308feac9c53d4080df31b7d81362bffbd086de2d.
+# Full on-disk SHA-256 recalculation required after download before model activation.
 VON_EXPECTED_SHA256: Dict[str, str] = {
-    "config.json": "8a32b988f0cb6733ecbe3db622be147b7486847feecab41d13dbff4d1b8276f7",
-    "tokenizer.json": "3cb15bf6ae0e729a4a754160ee693b1bc2dc3b0b7407519965d38c6411d51a66",
-    "tokenizer_config.json": "df873bc7962450532ff4bc2a9be71e21bca96b86064f26a117d91d9d9bbcb040",
-    "special_tokens_map.json": "9b1287c88b0a996da6c8888b13d2f9547d7c6753cb7d29ceca13e71d2b7811bf",
-    "model.safetensors": "47a3ff992b8d00344d18ecba1c23a7bb9184fc903d6d6ce0c3c6f8490a6188e4",
-    "option_marker.pt": "5bc83769c27f3d6ce7481ba93240212384a28f73e57f5c71b6935272a2490b84",
+    "config.json": "968db6072229e54691be4d535487a5c8d8132cc4893b6a3fdfa1e605457a7ec3",
+    "tokenizer.json": "3703d011b3ee259e00b59b60772f8fd54998d79e8fa5a1388d507eff28f8f09e",
+    "tokenizer_config.json": "57170b72a72c60407eec1f7894000c567309a8e41c5d0504b946c624cb069984",
+    "model.safetensors": "349c9b1bf3d5e3217a78c8039606e07069ffae4383640998f99a96bdb6b90c8d",
+    "option_marker.pt": "52202f176080d1efe38ca62c45264894fc7e444d332f4af6bac86f4e3146e0f2",
 }
 
 TORCH_CUDA12_RUNTIME = ModelRuntimeDescriptor(

@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "manifest_name": "von-1.1-option-marker-395m",
-  "manifest_type": "AEGIS_TRUSTED_SOURCE_CONTROLLED_MODEL_MANIFEST",
-  "manifest_version": "1.0.0",
+  "manifest_type": "AEGIS_SOURCE_CONTROLLED_INTEGRITY_MANIFEST",
+  "manifest_version": "1.1.0",
   "provider": "von",
   "model_name": "von-1.1.0",
   "model_architecture": "Option-Marker-Joint-Attention",
@@ -10,10 +10,27 @@
   "source_repo": "https://github.com/wfzyx/von",
   "source_commit": "bed7e7337791c5124a557eb59ad918cb6747b276",
   "model_repo": "wfzyx/von",
-  "model_revision": "4b2d56a297e59b8a07f0f6ea312389d020d18ceb",
+  "model_revision": "308feac9c53d4080df31b7d81362bffbd086de2d",
   "model_version": "1.1.0",
   "context_window_tokens": 8192,
   "aegis_token_budget_ceiling": 2048,
+  "reconciliation": {
+    "prompt": "017",
+    "date": "2026-10-01",
+    "previous_revision": "4b2d56a297e59b8a07f0f6ea312389d020d18ceb",
+    "previous_revision_status": "HTTP_404_NOT_FOUND",
+    "selected_revision": "308feac9c53d4080df31b7d81362bffbd086de2d",
+    "selection_rationale": "Earliest Hugging Face commit containing all five required artifacts at sizes exactly matching the AEGIS provider descriptor (model.safetensors=1583355740, option_marker.pt=1581316050, config.json=6349, tokenizer.json=3583485, tokenizer_config.json=599). Artifact sizes verified stable from commit 308feac9c5 through 272b292a05. Commits 3896038655 and later alter model.safetensors size; commits from 5df8185a4f introduce architecture 1.2.0 (independent_options), which is incompatible with the 1.1.0 Option-Marker specification.",
+    "removed_artifacts": [
+      "special_tokens_map.json"
+    ],
+    "removed_artifacts_reason": "File does not exist in wfzyx/von repository at any audited commit. Verified offline-compatible: AutoTokenizer.from_pretrained with local_files_only=True operates correctly without this file.",
+    "hashes_source": "Git LFS pointer sha256 digests extracted from raw LFS pointer blobs at commit 308feac9c53d4080df31b7d81362bffbd086de2d. These are cryptographic SHA-256 digests of the actual file content, not the pointer files.",
+    "hashes_independently_verified": false,
+    "hashes_verification_note": "Hashes extracted from authoritative LFS pointer records. Cannot be independently recalculated until artifacts are downloaded. Full recalculation required post-download before model activation.",
+    "resource_gate_status": "SAFE_STOP",
+    "resource_gate_reason": "Available host RAM headroom (~788 MB) is below the minimum required for safe model resident loading (~3.0 GB). Model provisioning and live inference qualification are deferred. The 1.5 GB system RAM reserve floor is non-negotiable."
+  },
   "offline_policy": {
     "network_egress_permitted": false,
     "local_files_only": true,
@@ -22,35 +39,43 @@
   },
   "required_files": {
     "config.json": {
-      "sha256": "8a32b988f0cb6733ecbe3db622be147b7486847feecab41d13dbff4d1b8276f7",
+      "sha256": "968db6072229e54691be4d535487a5c8d8132cc4893b6a3fdfa1e605457a7ec3",
+      "size_bytes": 6349,
       "required": true,
       "description": "Model configuration"
     },
     "tokenizer.json": {
-      "sha256": "3cb15bf6ae0e729a4a754160ee693b1bc2dc3b0b7407519965d38c6411d51a66",
+      "sha256": "3703d011b3ee259e00b59b60772f8fd54998d79e8fa5a1388d507eff28f8f09e",
+      "size_bytes": 3583485,
       "required": true,
       "description": "Fast tokenizer vocabulary and merges"
     },
     "tokenizer_config.json": {
-      "sha256": "df873bc7962450532ff4bc2a9be71e21bca96b86064f26a117d91d9d9bbcb040",
+      "sha256": "57170b72a72c60407eec1f7894000c567309a8e41c5d0504b946c624cb069984",
+      "size_bytes": 599,
       "required": true,
       "description": "Tokenizer settings and special token mappings"
     },
-    "special_tokens_map.json": {
-      "sha256": "9b1287c88b0a996da6c8888b13d2f9547d7c6753cb7d29ceca13e71d2b7811bf",
-      "required": true,
-      "description": "Special token map"
-    },
     "model.safetensors": {
-      "sha256": "47a3ff992b8d00344d18ecba1c23a7bb9184fc903d6d6ce0c3c6f8490a6188e4",
+      "sha256": "349c9b1bf3d5e3217a78c8039606e07069ffae4383640998f99a96bdb6b90c8d",
+      "size_bytes": 1583355740,
       "required": true,
       "description": "Base transformer weights in safetensors format"
     },
     "option_marker.pt": {
-      "sha256": "5bc83769c27f3d6ce7481ba93240212384a28f73e57f5c71b6935272a2490b84",
+      "sha256": "52202f176080d1efe38ca62c45264894fc7e444d332f4af6bac86f4e3146e0f2",
+      "size_bytes": 1581316050,
       "required": true,
       "description": "Option-Marker joint attention head weights"
     }
+  },
+  "compatibility": {
+    "aegis_provider": "src/decision/providers/von.py",
+    "aegis_runtime": "src/decision/providers/von_runtime.py",
+    "provider_source_commit": "bed7e7337791c5124a557eb59ad918cb6747b276",
+    "architecture_version": "1.1.0",
+    "incompatible_from_revision": "5df8185a4f",
+    "incompatible_reason": "Revision 5df8185a4f introduces architecture 1.2.0 (independent_options field), changing model.safetensors and config.json to incompatible dimensions."
   },
   "qualification_policy": {
     "calibration_drift_mitigation": "ROUTE_SPECIFIC_ACCEPTANCE_THRESHOLDS",

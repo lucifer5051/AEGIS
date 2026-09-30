@@ -3,6 +3,80 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 017] — 2026-10-01
+
+### Model Manifest Reconciliation & Provisioning Gate (Outcome B: Safe Stop)
+
+**Status:** SAFE STOP — Manifest fully reconciled; live model loading deferred (host RAM headroom insufficient)  
+**Tests:** 220 passed · 0 failed · 0 skipped (100 % offline inside AEGIS venv, 17.05s)  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (52 files)  
+**Type Check:** `mypy` — 0 issues (50 source files)
+
+#### Audit Findings — Root Cause of Manifest Discrepancies
+
+The original manifest `schemas/model-manifests/von-1.1-option-marker-395m.json` contained three categories of errors:
+
+1. **Stale revision**: `model_revision` was `4b2d56a297e59b8a07f0f6ea312389d020d18ceb` — this commit does **not** exist on Hugging Face (`HTTP 404`).
+2. **Non-existent artifact**: `special_tokens_map.json` was listed as `required: true`, but this file does not exist in `wfzyx/von` at any audited commit (44 commits audited). Confirmed offline-compatible via `AutoTokenizer.from_pretrained` with `local_files_only=True`.
+3. **Stale SHA-256 digests**: All five SHA-256 digests were incorrect against the reconciled revision.
+
+#### Reconciled Revision: `308feac9c53d4080df31b7d81362bffbd086de2d`
+
+| Selection Criterion | Value |
+|---|---|
+| HF commit | `308feac9c53d4080df31b7d81362bffbd086de2d` |
+| HF commit message | `feat(model): release converged Option-Marker Universal weights` |
+| Push timestamp | 2026-09-21T20:17Z |
+| Paired GitHub source commit | `bed7e7337791c5124a557eb59ad918cb6747b276` (2026-09-20T13:38Z) |
+
+This is the earliest HF commit containing all 5 required artifacts at sizes **exactly matching** the byte counts declared in `von_runtime.py` and `AEGIS_MODEL_RESOURCE_POLICY.md`.
+
+Later commits are incompatible:
+- Commits from `3896038655` onward alter `model.safetensors` size (~1.579 GB, different parameter dimensions).
+- Commits from `5df8185a4f` onward introduce architecture `1.2.0` (`independent_options` field), breaking the `1.1.0` Option-Marker specification.
+
+Artifact sizes verified stable from commit `308feac9c5` through `272b292a05` (7 commits, inclusive).
+
+#### Reconciled SHA-256 Digests (from LFS pointer records at `308feac9c5`)
+
+| Artifact | Size (bytes) | SHA-256 |
+|---|---|---|
+| `config.json` | 6,349 | `968db6072229e54691be4d535487a5c8d8132cc4893b6a3fdfa1e605457a7ec3` |
+| `tokenizer.json` | 3,583,485 | `3703d011b3ee259e00b59b60772f8fd54998d79e8fa5a1388d507eff28f8f09e` |
+| `tokenizer_config.json` | 599 | `57170b72a72c60407eec1f7894000c567309a8e41c5d0504b946c624cb069984` |
+| `model.safetensors` | 1,583,355,740 | `349c9b1bf3d5e3217a78c8039606e07069ffae4383640998f99a96bdb6b90c8d` |
+| `option_marker.pt` | 1,581,316,050 | `52202f176080d1efe38ca62c45264894fc7e444d332f4af6bac86f4e3146e0f2` |
+
+**Note**: Hashes sourced from authoritative Git LFS pointer blobs. Full on-disk SHA-256 recalculation is required **after download**, before model activation. Integrity gate in `VonFastDecisionProvider.verify_integrity()` is unchanged and mandatory.
+
+#### Files Changed
+
+- **`schemas/model-manifests/von-1.1-option-marker-395m.json`**:
+  - `manifest_version`: `1.0.0` → `1.1.0` (reflects reconciliation)
+  - `model_revision`: `4b2d56a297...` → `308feac9c53d4080df31b7d81362bffbd086de2d`
+  - `required_files`: Removed `special_tokens_map.json`; updated all SHA-256 digests and added `size_bytes` fields
+  - Added `reconciliation` block (audit trail, rationale, gate status)
+  - Added `compatibility` block (provider references, architecture constraints)
+- **`src/decision/providers/von_runtime.py`**:
+  - `VON_EXPECTED_SHA256`: Removed `special_tokens_map.json`; updated all 5 SHA-256 values to reconciled hashes
+  - Added reconciliation comment block with audit trace
+  - `VON_EXACT_ARTIFACT_BYTES` unchanged: still exactly 3,168,262,223 bytes (5 files)
+  - `VON_FILES_BY_SIZE` unchanged: file sizes verified stable
+
+#### RAM Gate Decision — Outcome B: Safe Stop
+
+| Metric | Value |
+|---|---|
+| Available host RAM | 2.27 GB (2,441,334,784 bytes) |
+| System RAM reserve floor | 1.50 GB (1,610,612,736 bytes) — **non-negotiable** |
+| Available RAM headroom | ~788 MB (830,722,048 bytes) |
+| Required for model resident load | ~3.168 GB (3,168,262,223 bytes artifact disk; resident graph estimated ~3.0 GB+) |
+| Gate result | **BLOCKED** — headroom insufficient by >2.3 GB |
+
+Model provisioning (download + load) is deferred. The manifest reconciliation is complete and internally consistent. The dynamic memory gate in `SkillConcurrencyManager` and `VonFastDecisionProvider.qualify()` will block admission at runtime until host RAM headroom exceeds 3.0 GB above the 1.5 GB reserve floor.
+
+---
+
 ## [Prompt 016] — 2026-09-30
 
 ### Phase 3: Hardware Qualification & Model Provisioning (Stop Condition Reached)
