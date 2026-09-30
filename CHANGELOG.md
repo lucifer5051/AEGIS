@@ -1,7 +1,53 @@
-﻿# AEGIS — Changelog
+# AEGIS — Changelog
 
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
+
+## [Prompt 016] — 2026-09-30
+
+### Phase 3: Hardware Qualification & Model Provisioning (Stop Condition Reached)
+
+**Status:** STOP CONDITION REACHED — Manifest checksum discrepancy & host memory limitation  
+**Tests:** 220 passed · 0 failed · 0 skipped (100 % offline inside AEGIS venv)  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (52 files)  
+**Type Check:** `mypy` — 0 errors (50 source files)
+
+#### Runtime Dependencies Installed (AEGIS venv `%USERPROFILE%\.aegis\venv`)
+- `torch 2.6.0+cu124` (isolated in venv, CUDA enabled with NVIDIA RTX 3050 Laptop GPU)
+- `transformers 5.18.0`
+- `tokenizers 0.23.2`
+- `accelerate 1.15.0`
+- `safetensors 0.8.0`
+- `numpy 2.5.3`
+- `von-sdk 1.3.5`
+- Zero modification to system Python.
+
+#### Hardware Measurements (Physical Host Live Empirical Inspection)
+- Host CPU: Intel Core i5-13450HX (10 cores, 16 logical)
+- Total Physical RAM: 15.69 GB (16,849,256,448 bytes)
+- Available Host RAM: 2.27 GB (2,441,334,784 bytes)
+- Total GPU VRAM: 6.00 GB (6,442,450,944 bytes, 6,144 MiB)
+- Free GPU VRAM: 5.49 GB (5,899,288,576 bytes, 5,626 MiB)
+- System RAM Reserve Floor: 1.50 GB (1,610,612,736 bytes)
+- Available RAM Headroom: 0.77 GB (~788 MB)
+
+#### Model Artifact Verification & Discrepancy (STOP Condition Triggered)
+- Inspected canonical manifest: `schemas/model-manifests/von-1.1-option-marker-395m.json`
+- Model repo: `wfzyx/von`
+- Declared revision: `4b2d56a297e59b8a07f0f6ea312389d020d18ceb`
+- Discrepancy 1: Revision `4b2d56a297e59b8a07f0f6ea312389d020d18ceb` does not exist on Hugging Face (`HTTP 404: Not Found`).
+- Discrepancy 2: Manifest lists `special_tokens_map.json` (sha256 `9b1287c88b0...`) as required, but this file does not exist in `wfzyx/von`.
+- Discrepancy 3: Manifest declares `config.json` sha256 `8a32b988f0cb6733ecbe3db622be147b7486847feecab41d13dbff4d1b8276f7`, but actual commits with 6349 bytes have sha256 `968db6072229e54691be4d535487a5c8d8132cc4893b6a3fdfa1e605457a7ec3`.
+- In strict adherence to Instruction #4 ("If any size, revision, source or checksum differs: STOP immediately and report the discrepancy"), no unverified model artifacts were downloaded or loaded into the repository.
+
+#### Concurrency Ceilings Derived from Empirical Measurements
+- Lightweight skills (CPU-only, no resident model): 3 concurrent skills (reaches target ceiling with 788 MB headroom / 24 MB marginal).
+- Heavyweight model skills (`SKILL_VON_ROUTING`): 0 concurrent skills (model load deferred; available RAM headroom of 788 MB is below the required ~3.0 GB resident footprint, strictly protected by the 1.5 GB system safety reserve).
+
+#### Quality & Type Check Fixes
+- `src/model_policy/qualification.py`: Added explicit `Literal["QUALIFIED", "CONSTRAINED", "FAILED"]` type annotation to resolve mypy arg-type error.
+- `tests/test_model_policy.py`: Migrated mock method assignments to `monkeypatch.setattr` to resolve mypy method-assign errors.
+- Applied `ruff format` across 52 source and test files.
 
 ---
 

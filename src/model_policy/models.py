@@ -25,10 +25,10 @@ class RuntimeFamily(str, Enum):
 class ConcurrencyMode(str, Enum):
     """Dynamic concurrency mode determined by live hardware benchmarking."""
 
-    OPTIMAL = "OPTIMAL"          # High headroom: target concurrent skills fully enabled
-    NORMAL = "NORMAL"            # Normal headroom: target concurrent skills enabled
+    OPTIMAL = "OPTIMAL"  # High headroom: target concurrent skills fully enabled
+    NORMAL = "NORMAL"  # Normal headroom: target concurrent skills enabled
     CONSTRAINED = "CONSTRAINED"  # Low headroom: shared residency or lightweight skills only
-    CRITICAL = "CRITICAL"        # Severe pressure: emergency single skill / advisory bypass
+    CRITICAL = "CRITICAL"  # Severe pressure: emergency single skill / advisory bypass
 
 
 class ModelRuntimeDescriptor(BaseModel):
@@ -166,9 +166,7 @@ class ConcurrencyEvaluation(BaseModel):
     max_safe_skills: int = Field(ge=0, description="Current dynamic safe skill concurrency limit.")
     mode: ConcurrencyMode = Field(description="Dynamic concurrency mode at evaluation time.")
     reason: str = Field(description="Human-readable rationale for the admission decision.")
-    measured_free_ram_bytes: int = Field(
-        ge=0, description="Live measured free RAM at evaluation."
-    )
+    measured_free_ram_bytes: int = Field(ge=0, description="Live measured free RAM at evaluation.")
     measured_free_vram_bytes: int = Field(
         ge=0, description="Live measured free VRAM at evaluation."
     )
@@ -196,9 +194,7 @@ class StorageBudgetStatus(BaseModel):
     consumed_runtime_bytes: int = Field(
         ge=0, description="Deduplicated disk footprint of installed runtimes."
     )
-    consumed_artifact_bytes: int = Field(
-        ge=0, description="Sum of installed model artifact sizes."
-    )
+    consumed_artifact_bytes: int = Field(ge=0, description="Sum of installed model artifact sizes.")
     remaining_budget_bytes: int = Field(
         ge=0, description="Available capacity within the model storage budget."
     )

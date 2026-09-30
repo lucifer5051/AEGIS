@@ -32,7 +32,7 @@ class SkillConcurrencyManager:
         benchmark: Optional[LiveHardwareBenchmark] = None,
         system_ram_reserve_bytes: int = 1536 * 1024 * 1024,  # Configurable 1.5 GB default
         system_vram_reserve_bytes: int = 512 * 1024 * 1024,  # Configurable 512 MB default
-        target_concurrent_skills: int = 3,                   # Configurable target ceiling
+        target_concurrent_skills: int = 3,  # Configurable target ceiling
     ) -> None:
         self.residency_manager = residency_manager
         self.benchmark = benchmark or LiveHardwareBenchmark()
@@ -45,9 +45,7 @@ class SkillConcurrencyManager:
         # Map of lease_id -> active SkillExecutionLease
         self._active_leases: Dict[str, SkillExecutionLease] = {}
 
-    def register_qualification_profile(
-        self, profile: ModelHardwareQualificationProfile
-    ) -> None:
+    def register_qualification_profile(self, profile: ModelHardwareQualificationProfile) -> None:
         """Register an empirical hardware qualification profile for a model."""
         self._qualification_profiles[profile.model_id] = profile
 
@@ -106,8 +104,8 @@ class SkillConcurrencyManager:
                     active_skill_count=active_count,
                     max_safe_skills=max(1, active_count),
                     mode=mode,
-                    reason=f"Insufficient RAM headroom ({ram_headroom // (1024*1024)} MB free) "
-                           f"for lightweight skill ({marginal_ram // (1024*1024)} MB needed).",
+                    reason=f"Insufficient RAM headroom ({ram_headroom // (1024 * 1024)} MB free) "
+                    f"for lightweight skill ({marginal_ram // (1024 * 1024)} MB needed).",
                     measured_free_ram_bytes=avail_ram,
                     measured_free_vram_bytes=free_vram,
                 )
@@ -118,7 +116,7 @@ class SkillConcurrencyManager:
                     max_safe_skills=self.target_concurrent_skills,
                     mode=mode,
                     reason=f"Active skills ({active_count}) reached target ceiling "
-                           f"({self.target_concurrent_skills}).",
+                    f"({self.target_concurrent_skills}).",
                     measured_free_ram_bytes=avail_ram,
                     measured_free_vram_bytes=free_vram,
                 )
@@ -170,7 +168,7 @@ class SkillConcurrencyManager:
                 max_safe_skills=0 if not is_already_resident else active_count,
                 mode=mode,
                 reason=(
-                    f"RAM memory gate: needed {needed_ram // (1024*1024)} MB "
+                    f"RAM memory gate: needed {needed_ram // (1024 * 1024)} MB "
                     f"(resident={res_mb} MB, marginal={marg_mb} MB), "
                     f"but available headroom is only {head_mb} MB "
                     f"(live free={live_mb} MB, reserve={resv_mb} MB)."
@@ -185,8 +183,8 @@ class SkillConcurrencyManager:
                 active_skill_count=active_count,
                 max_safe_skills=0 if not is_already_resident else active_count,
                 mode=mode,
-                reason=f"VRAM memory gate: needed {needed_vram // (1024*1024)} MB, "
-                       f"but free VRAM headroom is {vram_headroom // (1024*1024)} MB.",
+                reason=f"VRAM memory gate: needed {needed_vram // (1024 * 1024)} MB, "
+                f"but free VRAM headroom is {vram_headroom // (1024 * 1024)} MB.",
                 measured_free_ram_bytes=avail_ram,
                 measured_free_vram_bytes=free_vram,
             )
@@ -203,7 +201,7 @@ class SkillConcurrencyManager:
                 max_safe_skills=max_safe_skills,
                 mode=mode,
                 reason=f"Active skills ({active_count}) reached qualification-derived safe limit "
-                       f"({max_safe_skills}).",
+                f"({max_safe_skills}).",
                 measured_free_ram_bytes=avail_ram,
                 measured_free_vram_bytes=free_vram,
             )
@@ -276,6 +274,4 @@ class SkillConcurrencyManager:
             active_lease.is_active = False
 
             if active_lease.model_id is not None:
-                self.residency_manager.detach_skill_lease(
-                    active_lease.model_id, lease_id
-                )
+                self.residency_manager.detach_skill_lease(active_lease.model_id, lease_id)

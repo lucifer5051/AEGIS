@@ -73,7 +73,7 @@ class ModelStoragePolicy:
                 free_storage_bytes=0,
                 storage_floor_bytes=self.min_host_reserve_bytes,
                 reason=f"Storage boundary violation: '{self.storage_root}' "
-                       f"cannot be inside OneDrive or repository.",
+                f"cannot be inside OneDrive or repository.",
             )
 
         # 2. Look up model and runtime descriptors
@@ -124,7 +124,7 @@ class ModelStoragePolicy:
                 free_storage_bytes=host_free,
                 storage_floor_bytes=self.min_host_reserve_bytes,
                 reason=f"Host storage floor violation: free space after installation "
-                       f"({margin} GB) would fall below minimum reserve ({floor_gb} GB).",
+                f"({margin} GB) would fall below minimum reserve ({floor_gb} GB).",
             )
 
         # 5. Check global model budget
@@ -146,7 +146,7 @@ class ModelStoragePolicy:
                 free_storage_bytes=host_free,
                 storage_floor_bytes=self.min_host_reserve_bytes,
                 reason=f"Global model budget violation: requires {needed_gb:.2f} GB, "
-                       f"but remaining budget is only {rem_gb:.2f} GB.",
+                f"but remaining budget is only {rem_gb:.2f} GB.",
             )
 
         return PreflightResult(

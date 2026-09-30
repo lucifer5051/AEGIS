@@ -176,9 +176,7 @@ def test_08_offline_by_construction_no_network_allowed(
     assert res.is_advisory_only is True
 
 
-def test_09_non_blocking_concurrency_admission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_09_non_blocking_concurrency_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Assert concurrent request immediately receives ADMISSION_BUSY fallback without queuing."""
     started_first = threading.Event()
     finish_first = threading.Event()

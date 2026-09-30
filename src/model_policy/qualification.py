@@ -13,7 +13,7 @@ import json
 import platform
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 from src.model_policy.live_benchmark import LiveHardwareBenchmark
 from src.model_policy.models import ModelHardwareQualificationProfile
@@ -33,9 +33,7 @@ class ModelHardwareQualifier:
     def compute_hardware_hash(self) -> str:
         """Compute deterministic digest of host hardware characteristics."""
         _, total_ram, _, total_vram = self.benchmark.query_live_memory()
-        machine_info = (
-            f"{platform.processor()}|{platform.machine()}|{total_ram}|{total_vram}"
-        )
+        machine_info = f"{platform.processor()}|{platform.machine()}|{total_ram}|{total_vram}"
         return hashlib.sha256(machine_info.encode("utf-8")).hexdigest()[:16]
 
     def qualify_model(
@@ -91,7 +89,7 @@ class ModelHardwareQualifier:
         final_marginal_ram = max(marginal_ram_max, 32 * 1024 * 1024)
         final_marginal_vram = max(marginal_vram_max, 16 * 1024 * 1024)
 
-        status = "QUALIFIED"
+        status: Literal["QUALIFIED", "CONSTRAINED", "FAILED"] = "QUALIFIED"
         if resident_ram > 6 * 1024 * 1024 * 1024 or resident_vram > 5 * 1024 * 1024 * 1024:
             status = "CONSTRAINED"
 

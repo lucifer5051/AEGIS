@@ -306,6 +306,7 @@ class VonFastDecisionProvider(FastDecisionProvider):
         lease = None
         if self.concurrency_manager is not None:
             from src.decision.providers.von_runtime import SKILL_VON_ROUTING
+
             lease = self.concurrency_manager.acquire_skill_lease(SKILL_VON_ROUTING)
             if lease is None:
                 logger.info(

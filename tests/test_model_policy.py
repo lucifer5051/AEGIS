@@ -299,7 +299,7 @@ def test_12_shared_model_multiple_skills_concurrency():
         manifest_name="von-1.1-option-marker-395m",
         hardware_hash="mock-hash",
         measured_resident_ram_bytes=2000 * 1024 * 1024,  # 2.0 GB
-        measured_resident_vram_bytes=1500 * 1024 * 1024, # 1.5 GB
+        measured_resident_vram_bytes=1500 * 1024 * 1024,  # 1.5 GB
         measured_marginal_ram_bytes=64 * 1024 * 1024,
         measured_marginal_vram_bytes=32 * 1024 * 1024,
         measured_p95_latency_ms=10.0,
@@ -482,7 +482,9 @@ def test_17_lightweight_skill_permitted_even_when_heavy_blocked():
 # ==============================================================================
 # 7. PROVIDER INTEGRATION & FALLBACK
 # ==============================================================================
-def test_18_von_provider_integrates_concurrency_manager(tmp_path: Path):
+def test_18_von_provider_integrates_concurrency_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Verify VonFastDecisionProvider acquires and releases lease during evaluate()."""
     res_mgr = ModelResidencyManager()
     benchmark = LiveHardwareBenchmark(
@@ -516,9 +518,9 @@ def test_18_von_provider_integrates_concurrency_manager(tmp_path: Path):
     )
 
     # Mock integrity & smoke
-    provider.verify_integrity = MagicMock(return_value=True)
-    provider.validate_storage_boundaries = MagicMock(return_value=None)
-    provider._run_smoke_inference = MagicMock(return_value=True)
+    monkeypatch.setattr(provider, "verify_integrity", MagicMock(return_value=True))
+    monkeypatch.setattr(provider, "validate_storage_boundaries", MagicMock(return_value=None))
+    monkeypatch.setattr(provider, "_run_smoke_inference", MagicMock(return_value=True))
     assert provider.initialize() is True
 
     # Pre-evaluate lease count is 0
@@ -538,7 +540,9 @@ def test_18_von_provider_integrates_concurrency_manager(tmp_path: Path):
     assert concurrency_mgr.get_active_skill_count() == 0
 
 
-def test_19_von_provider_falls_back_when_concurrency_denied(tmp_path: Path):
+def test_19_von_provider_falls_back_when_concurrency_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """Verify VonFastDecisionProvider returns fallback ADMISSION_BUSY when concurrency denied."""
     res_mgr = ModelResidencyManager()
     # Free RAM too low: 1.5 GB free with 1.5 GB reserve -> 0 headroom
@@ -563,9 +567,9 @@ def test_19_von_provider_falls_back_when_concurrency_denied(tmp_path: Path):
         concurrency_manager=concurrency_mgr,
     )
 
-    provider.verify_integrity = MagicMock(return_value=True)
-    provider.validate_storage_boundaries = MagicMock(return_value=None)
-    provider._run_smoke_inference = MagicMock(return_value=True)
+    monkeypatch.setattr(provider, "verify_integrity", MagicMock(return_value=True))
+    monkeypatch.setattr(provider, "validate_storage_boundaries", MagicMock(return_value=None))
+    monkeypatch.setattr(provider, "_run_smoke_inference", MagicMock(return_value=True))
     assert provider.initialize() is True
 
     req = FastDecisionRequest(user_input="Check log status.")
