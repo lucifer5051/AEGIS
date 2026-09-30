@@ -3,6 +3,62 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 018] — 2026-10-01
+
+### Controlled Model Provisioning & Empirical Hardware Qualification (Outcome B: Safe Defer)
+
+**Status:** SAFE DEFER (Outcome B) — Storage preflight passed; model loading safely deferred due to non-negotiable host RAM reserve gate  
+**Tests:** 224 passed · 0 failed · 0 skipped (100% offline inside AEGIS venv, 14.63s)  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (52 files)  
+**Type Check:** `mypy` — 0 issues (50 source files)  
+
+#### 1. Live Hardware Measurements & Memory Gate
+- **Total Physical RAM:** 15.69 GB (16,849,256,448 bytes)
+- **Live Available RAM:** 2.49 GB (2,670,710,784 bytes)
+- **Configured System RAM Reserve Floor:** 1.50 GB (1,610,612,736 bytes) — **Non-negotiable**
+- **Live Usable RAM Headroom:** 0.99 GB (1,011.0 MB / 1,060,098,048 bytes)
+- **Model Resident Load Requirement:** 3,200 MB resident + 64 MB marginal = 3,264 MB (~3.19 GB)
+- **Headroom Shortfall:** 2,253 MB (~2.20 GB) below safe admission requirement
+- **Total VRAM:** 6.00 GB (6,442,450,944 bytes) · **Available VRAM:** 5.53 GB (5,934,940,160 bytes)
+- **Storage Preflight:** PASS (Host free: 80.76 GB > 40.00 GB floor; required: 7.42 GB permanent)
+
+#### 2. Resource Gate & Safe Defer Determination
+- In accordance with Section 2 of Prompt 018 and AEGIS resource-policy specifications, current available RAM does not satisfy the safe admission and provisioning threshold.
+- The 1.50 GB system RAM reserve floor is strictly preserved and was not lowered or bypassed.
+- Model initialization is not attempted, and zero synthetic/faked qualification profiles were created.
+- Per Section 2 and Acceptable Outcomes, the system fails closed and executes **Outcome B (Safe Defer)**.
+
+#### 3. Concurrency Qualification & Skill Admission
+- **Lightweight Skills** (CPU-only, e.g. `SKILL_LIGHTWEIGHT_VALIDATOR`):
+  - Admission status: **Permitted** (`permitted=True`)
+  - Dynamic concurrency ceiling: **3 concurrent skills** (`min(3, 1 + (1,011 MB // 24 MB)) = 3`)
+- **Heavyweight Model Skills** (requires model residency, e.g. `SKILL_VON_ROUTING`):
+  - Admission status: **Denied / Blocked** (`permitted=False`)
+  - Dynamic concurrency ceiling: **0 concurrent skills** (`max_safe_skills=0`)
+  - Rationale: Live available RAM headroom (1,011 MB) < required memory (3,264 MB).
+  - Degrades safely and non-blockingly to Manager fallback (`FallbackReason.ADMISSION_BUSY`).
+
+#### 4. Verified Failure Behavior & Quality Gate Expansion
+- Verified all 8 failure modes required by Section 8:
+  1. *Missing artifact*: Fails closed with `verify_integrity() == False`, status `DISABLED`.
+  2. *Corrupt/hash-mismatched artifact*: Detected and rejected by SHA-256 verification.
+  3. *Insufficient RAM*: Dynamic memory gate blocks admission with `permitted=False`.
+  4. *Insufficient VRAM*: Dynamic VRAM gate blocks admission with `permitted=False` (`test_21`).
+  5. *Unavailable runtime*: Raises `ProviderUnavailableError` gracefully (`test_12`).
+  6. *Initialization failure*: Smoke failure unloads backend and sets status `ERROR` (`test_13`).
+  7. *Inference exception/error*: Returns `FallbackReason.INFERENCE_EXCEPTION`, releases inference lock and skill lease (`test_14`).
+  8. *Concurrent admission exhaustion*: Non-blocking single-flight lock immediately falls back to `ADMISSION_BUSY`.
+- Enhanced `VonFastDecisionProvider.unload()` to accept `target_status` to preserve explicit failure states (`ERROR`, `DISABLED`).
+
+#### 5. Architectural Status
+- **DESIGNED:** Local Fast Decision Engine architecture, Option-Marker joint attention, 2–3 skill concurrency target, 1.5 GB RAM reserve floor, 512 MB VRAM reserve floor, 40 GB host storage floor, 30 GB model storage budget.
+- **IMPLEMENTED:** Model policy subsystem (`ModelStoragePolicy`, `LiveHardwareBenchmark`, `ModelHardwareQualifier`, `ModelResidencyManager`, `SkillConcurrencyManager`), Fast Decision provider (`VonFastDecisionProvider`), storage boundary enforcement, offline load verification, fail-closed error handling.
+- **VERIFIED:** Reconciled manifest consistency, offline tokenizer operation, storage preflight checks, all 8 failure modes, 224 automated unit tests.
+- **QUALIFIED:** Empirical live hardware detection and memory query, lightweight skill admission ceiling (3 concurrent skills).
+- **DEFERRED:** Model weights download and live empirical resident load qualification deferred under **OUTCOME B (SAFE DEFER)** due to live RAM headroom constraint (0.99 GB available headroom vs 3.20 GB required).
+
+---
+
 ## [Prompt 017] — 2026-10-01
 
 ### Model Manifest Reconciliation & Provisioning Gate (Outcome B: Safe Stop)

@@ -610,3 +610,24 @@ def test_20_concurrency_manager_release_frees_capacity():
     lease2 = concurrency_mgr.acquire_skill_lease(SKILL_LIGHTWEIGHT_VALIDATOR)
     assert lease2 is not None
     concurrency_mgr.release_skill_lease(lease2)
+
+
+def test_21_dynamic_vram_gate_blocks_heavy_model_under_insufficient_vram():
+    """Verify dynamic VRAM gate blocks heavy model when VRAM headroom is insufficient."""
+    res_mgr = ModelResidencyManager()
+    # High RAM (8 GB), but free VRAM is 600 MB with 512 MB reserve -> only 88 MB headroom
+    # Heavy model uncalibrated requires 1600 MB resident + 32 MB marginal VRAM = 1632 MB needed
+    benchmark = LiveHardwareBenchmark(
+        mock_avail_ram_bytes=8 * 1024 * 1024 * 1024,
+        mock_free_vram_bytes=600 * 1024 * 1024,
+    )
+    concurrency_mgr = SkillConcurrencyManager(
+        residency_manager=res_mgr,
+        benchmark=benchmark,
+        system_vram_reserve_bytes=512 * 1024 * 1024,
+    )
+
+    eval_result = concurrency_mgr.evaluate_skill_admission(SKILL_VON_ROUTING)
+    assert eval_result.permitted is False
+    assert "VRAM memory gate" in eval_result.reason
+    assert eval_result.max_safe_skills == 0

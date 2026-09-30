@@ -17,6 +17,7 @@ import pytest
 
 from src.decision.errors import (
     ModelIntegrityError,
+    ProviderUnavailableError,
 )
 from src.decision.models import (
     DecisionOutcome,
@@ -271,3 +272,76 @@ def test_11_hardware_qualification_insufficient_ram(
     qualified = provider.qualify(hardware_profile=FakeHardwareProfile())
     assert qualified is False
     assert provider.status == ProviderStatus.DISABLED
+
+
+def test_12_unavailable_runtime_raises_provider_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Assert missing runtime dependency raises ProviderUnavailableError during load."""
+    import builtins
+
+    provider = VonFastDecisionProvider(checkpoint_dir=tmp_path / "valid_dir")
+    monkeypatch.setattr(provider, "verify_integrity", lambda: True)
+    monkeypatch.setattr(provider, "validate_storage_boundaries", lambda: None)
+
+    real_import = builtins.__import__
+
+    def mock_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "von":
+            raise ImportError("No module named 'von'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+
+    with pytest.raises(ProviderUnavailableError, match="Von dependencies"):
+        provider._load_native_backend()
+
+
+def test_13_initialization_failure_on_smoke_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Assert initialization failure when smoke verification fails unloads backend."""
+    from unittest.mock import MagicMock
+
+    mock_backend = MagicMock()
+    provider = VonFastDecisionProvider(
+        checkpoint_dir=tmp_path / "valid_dir",
+        backend_factory=lambda p: mock_backend,
+    )
+    monkeypatch.setattr(provider, "verify_integrity", lambda: True)
+    monkeypatch.setattr(provider, "validate_storage_boundaries", lambda: None)
+    monkeypatch.setattr(provider, "_run_smoke_inference", lambda: False)
+
+    assert provider.initialize() is False
+    assert provider.status == ProviderStatus.ERROR
+    assert provider.is_ready() is False
+
+
+def test_14_inference_exception_fails_closed_and_releases_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Assert an exception during inference returns fallback and releases locks/leases."""
+    from unittest.mock import MagicMock
+
+    def failing_inference(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("GPU OOM or internal inference error")
+
+    provider = VonFastDecisionProvider(
+        checkpoint_dir=tmp_path / "valid_dir",
+        backend_factory=lambda p: MagicMock(),
+    )
+    monkeypatch.setattr(provider, "verify_integrity", lambda: True)
+    monkeypatch.setattr(provider, "validate_storage_boundaries", lambda: None)
+    monkeypatch.setattr(provider, "_run_smoke_inference", lambda: True)
+    monkeypatch.setattr(provider, "_perform_inference", failing_inference)
+
+    assert provider.initialize() is True
+
+    req = FastDecisionRequest(user_input="trigger failure")
+    criteria = {DecisionRoute.TERMINAL_INTENT: "Command line"}
+    res = provider.evaluate(req, criteria)
+
+    assert res.outcome == DecisionOutcome.FALLBACK_TO_MANAGER
+    assert res.fallback_reason == FallbackReason.INFERENCE_EXCEPTION
+    assert res.is_advisory_only is True
+
+    # Lock must be released
+    assert not provider._inference_lock.locked()

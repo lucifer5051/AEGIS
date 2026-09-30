@@ -363,24 +363,24 @@ FORBIDDEN:  <any path inside Git repo>
 | Empirical hardware measurement | COMPLETE -- live host memory sampled via `LiveHardwareBenchmark` |
 | Safe concurrent-skill ceiling | DERIVED from live physical host measurements |
 
-### Empirical Physical Host Hardware Measurements (2026-10-01 Live Sampling)
+### Empirical Physical Host Hardware Measurements (2026-10-01 Prompt 018 Sampling)
 
 | Metric | Measured Physical Value | Notes |
 |---|---|---|
 | CPU Processor | Intel Core i5-13450HX, 10 cores, 16 logical | GenuineIntel AMD64 |
 | Total Physical RAM | 15.69 GB (16,849,256,448 bytes) | Via Windows `GlobalMemoryStatusEx` |
-| Available Host RAM | 2.27 GB (2,441,334,784 bytes) | Measured live free host RAM |
+| Available Host RAM | 2.49 GB (2,670,710,784 bytes) | Measured live free host RAM |
 | Total GPU VRAM | 6.00 GB (6,442,450,944 bytes, 6,144 MiB) | NVIDIA RTX 3050 Laptop GPU (via nvidia-smi) |
-| Free GPU VRAM | 5.49 GB (5,899,288,576 bytes, 5,626 MiB) | Measured live free GPU VRAM |
+| Free GPU VRAM | 5.53 GB (5,934,940,160 bytes, 5,660 MiB) | Measured live free GPU VRAM |
 | Configured System RAM Reserve | 1.50 GB (1,610,612,736 bytes) | Mandatory non-negotiable safety floor |
-| Available RAM Headroom | 0.77 GB (~788 MB) | LiveFreeRAM - SystemRAMReserve |
+| Available RAM Headroom | 0.99 GB (~1,011 MB / 1,060,098,048 bytes) | LiveFreeRAM - SystemRAMReserve |
 
 ### Actual Safe Concurrent-Skill Ceiling
 
 | Skill Category | Measured Ceiling | Rationale |
 |---|---|---|
-| Lightweight Skills (CPU-only, no model) | **3 concurrent skills** | `min(3, 1 + (788 MB // 24 MB)) = 3` (reaches target ceiling) |
-| Heavyweight Skills (`SKILL_VON_ROUTING`) | **0 concurrent skills** | Model requires ~3.0 GB resident RAM; live RAM headroom is 788 MB. Model load is safely deferred/blocked by dynamic memory gate. |
+| Lightweight Skills (CPU-only, no model) | **3 concurrent skills** | `min(3, 1 + (1,011 MB // 24 MB)) = 3` (reaches target ceiling) |
+| Heavyweight Skills (`SKILL_VON_ROUTING`) | **0 concurrent skills** | Model requires ~3.2 GB resident RAM; live RAM headroom is 1,011 MB. Model load is safely deferred/blocked by dynamic memory gate. |
 
 ---
 
@@ -413,17 +413,17 @@ FORBIDDEN:  <any path inside Git repo>
 
 ## 9. Test State
 
-### Verified Test Run -- 2026-10-01 ~00:04 IST (Prompt 016)
+### Verified Test Run -- 2026-10-01 ~01:22 IST (Prompt 018)
 
 Command: `& "$env:USERPROFILE\.aegis\venv\Scripts\pytest.exe" tests/ -v --tb=short` (AEGIS virtual environment activated)
 
 | Metric | Value |
 |---|---|
-| Total tests collected | 220 |
-| Tests passed | 220 |
+| Total tests collected | 224 |
+| Tests passed | 224 |
 | Tests failed | 0 |
 | Tests skipped | 0 |
-| Total test execution time | 16.35s |
+| Total test execution time | 14.63s |
 
 ### Test Breakdown by Module
 
@@ -435,9 +435,9 @@ Command: `& "$env:USERPROFILE\.aegis\venv\Scripts\pytest.exe" tests/ -v --tb=sho
 | test_environment_validation.py | 13 | YES | Repo structure, Python 3.12, isolated venv, zero secrets |
 | test_fast_decision.py | 15 | YES | Fast Decision Engine service, routes |
 | test_hardware_detection.py | 25 | YES | CPU/RAM/GPU/storage detection |
-| test_model_policy.py | 20 | YES | Model policy, concurrency, residency |
+| test_model_policy.py | 21 | YES | Model policy, concurrency, residency, VRAM gate |
 | test_storage.py | 52 | YES | SQLite storage, migrations, health |
-| test_von_provider.py | 11 | YES | Von provider, boundary enforcement |
+| test_von_provider.py | 14 | YES | Von provider, boundary enforcement, failure modes |
 
 ### Lint Status
 
@@ -905,5 +905,91 @@ Branch: `main` (7 commits ahead of `origin/main`; do NOT push)
 
 ---
 
-End of AEGIS Project State Document -- Prompt 017
-Next update required after: Prompt 018
+## 10. Prompt 018 — Controlled Model Provisioning & Empirical Hardware Qualification
+
+### 10.1 Execution Overview
+
+| Item | Result |
+|---|---|
+| Prompt | 018 |
+| Outcome | **OUTCOME B — SAFE DEFER** |
+| Virtual environment | `%USERPROFILE%\.aegis\venv` (Python 3.12.10) |
+| Manifest | `schemas/model-manifests/von-1.1-option-marker-395m.json` (v1.1.0) |
+| Reconciled revision | `308feac9c53d4080df31b7d81362bffbd086de2d` |
+| Manifest consistency | 100% verified (hashes match runtime constants) |
+| Storage preflight | PASSED (80.76 GB host free vs 40.0 GB floor; 7.42 GB permanent required) |
+| Resource gate | **BLOCKED (SAFE STOP / SAFE DEFER)** — RAM headroom shortfall |
+| Model download | DEFERRED (no loading permitted under current memory gate) |
+| Model loading | DEFERRED (fail-closed; no artificial bypass of reserves) |
+| Total tests | **224 passed / 0 failed / 0 skipped** (14.63s) |
+| Lint | `ruff check` — 0 errors |
+| Format | `ruff format --check` — clean (52 files) |
+| Type check | `mypy` — 0 issues (50 source files) |
+
+### 10.2 Empirical Resource Gate Analysis
+
+| Metric | Measured Physical Value | Threshold / Reserve | Gate Status |
+|---|---|---|---|
+| Total System RAM | 15.69 GB (16,849,256,448 B) | — | Baseline |
+| Live Available RAM | 2.49 GB (2,670,710,784 B) | Min 1.50 GB reserve | Measured |
+| System RAM Reserve Floor | 1.50 GB (1,610,612,736 B) | Non-negotiable | Enforced |
+| Usable RAM Headroom | **0.99 GB (1,011.0 MB)** | Required: 3,264 MB | **SHORTFALL: 2,253 MB** |
+| Total GPU VRAM | 6.00 GB (6,442,450,944 B) | — | Baseline |
+| Live Available GPU VRAM | 5.53 GB (5,934,940,160 B) | Min 512 MB reserve | Adequate |
+| Usable VRAM Headroom | 5.03 GB (5,148.0 MB) | Required: 1,632 MB | Adequate |
+| Host Volume Free Storage | 80.76 GB (86,714,691,584 B) | Min 40.0 GB floor | **PASS** |
+
+**Determination:** While host disk storage comfortably satisfies preflight (80.76 GB free > 40.0 GB reserve floor + 7.42 GB required footprint), live host RAM headroom (1,011 MB) falls 2,253 MB short of the 3,264 MB resident + marginal memory required for safe local execution. In accordance with AEGIS architectural invariants and Prompt 018 instructions:
+- The 1.50 GB system RAM reserve floor is strictly preserved.
+- Model loading is not attempted.
+- Zero synthetic qualification profiles are created.
+- System fails closed with **Outcome B (Safe Defer)**.
+
+### 10.3 Concurrency Qualification Results
+
+- **Lightweight Skills** (e.g. `SKILL_LIGHTWEIGHT_VALIDATOR`, 24 MB marginal RAM, 0 VRAM):
+  - Evaluation: `permitted=True`
+  - Mode: `ConcurrencyMode.CONSTRAINED`
+  - Max safe concurrent skills: **3 concurrent skills** (achieves AEGIS architectural ceiling)
+- **Heavyweight Model Skills** (e.g. `SKILL_VON_ROUTING`, requires local model residency):
+  - Evaluation: `permitted=False`
+  - Mode: `ConcurrencyMode.CONSTRAINED`
+  - Max safe concurrent skills: **0 concurrent skills**
+  - Rationale: `RAM memory gate: needed 3264 MB (resident=3200 MB, marginal=64 MB), but available headroom is only 1177 MB (live free=2713 MB, reserve=1536 MB).`
+  - Admission fails closed non-blockingly to Manager fallback (`FallbackReason.ADMISSION_BUSY`).
+
+### 10.4 Verified Failure Behaviors (8/8 Verified)
+
+| Failure Mode | Subsystem | Mechanism | Test |
+|---|---|---|---|
+| 1. Missing artifact | Von Provider | `verify_integrity() -> False`, status `DISABLED` | `test_06` |
+| 2. Corrupt / hash mismatch | Von Provider | SHA-256 recalculation detects tamper; fails closed | `test_07` |
+| 3. Insufficient RAM | Concurrency Mgr | Memory gate evaluates headroom < needed; `permitted=False` | `test_15` |
+| 4. Insufficient VRAM | Concurrency Mgr | VRAM gate evaluates VRAM headroom < needed; `permitted=False` | `test_21` |
+| 5. Unavailable runtime | Von Provider | Missing dependency raises `ProviderUnavailableError` | `test_12` |
+| 6. Initialization failure | Von Provider | Smoke failure unloads backend, sets status `ERROR` | `test_13` |
+| 7. Inference timeout / error | Von Provider | Exception returns `FallbackReason.INFERENCE_EXCEPTION`, releases lock & lease | `test_14` |
+| 8. Concurrency exhaustion | Von Provider / Mgr | Non-blocking lock returns `ADMISSION_BUSY` without queuing | `test_09`, `test_19` |
+
+### 10.5 Code Modifications in Prompt 018
+
+```
+M  src/decision/providers/von.py  (unload accepts target_status to preserve ERROR/DISABLED state)
+M  tests/test_model_policy.py     (added test_21 for dynamic VRAM gate enforcement)
+M  tests/test_von_provider.py     (added test_12, test_13, test_14 covering remaining failure modes)
+M  CHANGELOG.md                   (added Prompt 018 entry)
+M  docs/AEGIS_PROJECT_STATE.md    (updated §7, §9, added §10)
+```
+
+### 10.6 Architectural Status Summary
+
+- **DESIGNED:** Local Fast Decision Engine architecture, Option-Marker joint attention, 2–3 skill concurrency target, 1.5 GB RAM reserve floor, 512 MB VRAM reserve floor, 40 GB host storage floor, 30 GB model storage budget.
+- **IMPLEMENTED:** Model policy subsystem (`ModelStoragePolicy`, `LiveHardwareBenchmark`, `ModelHardwareQualifier`, `ModelResidencyManager`, `SkillConcurrencyManager`), Fast Decision provider (`VonFastDecisionProvider`), storage boundary enforcement, offline load verification, fail-closed error handling.
+- **VERIFIED:** Reconciled manifest consistency, offline tokenizer operation, storage preflight checks, all 8 failure modes, 224 automated unit tests.
+- **QUALIFIED:** Empirical live hardware detection and memory query, lightweight skill admission ceiling (3 concurrent skills).
+- **DEFERRED:** Model weights download and live empirical resident load qualification deferred under **OUTCOME B (SAFE DEFER)** due to live RAM headroom constraint (0.99 GB available headroom vs 3.20 GB required).
+
+---
+
+End of AEGIS Project State Document -- Prompt 018
+Next update required after: Phase 4

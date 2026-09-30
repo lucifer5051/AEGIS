@@ -261,8 +261,7 @@ class VonFastDecisionProvider(FastDecisionProvider):
             smoke_ok = self._run_smoke_inference()
             if not smoke_ok:
                 logger.error("Von smoke inference failed. Provider ERROR.")
-                self._status = ProviderStatus.ERROR
-                self.unload()
+                self.unload(target_status=ProviderStatus.ERROR)
                 return False
 
             self._status = ProviderStatus.READY
@@ -274,8 +273,7 @@ class VonFastDecisionProvider(FastDecisionProvider):
 
         except Exception as exc:
             logger.error("Failed to initialize Von provider backend: %s", exc)
-            self._status = ProviderStatus.DISABLED
-            self.unload()
+            self.unload(target_status=ProviderStatus.DISABLED)
             return False
 
     def is_ready(self) -> bool:
@@ -368,11 +366,11 @@ class VonFastDecisionProvider(FastDecisionProvider):
             if lease is not None and self.concurrency_manager is not None:
                 self.concurrency_manager.release_skill_lease(lease)
 
-    def unload(self) -> None:
+    def unload(self, target_status: ProviderStatus = ProviderStatus.UNINITIALIZED) -> None:
         """Release resident model memory."""
         self._model_backend = None
-        self._status = ProviderStatus.UNINITIALIZED
-        logger.debug("Von provider unloaded.")
+        self._status = target_status
+        logger.debug("Von provider unloaded with status %s.", target_status)
 
     def get_metrics(self) -> ProviderMetrics:
         """Compute rolling percentiles and operational metrics."""
