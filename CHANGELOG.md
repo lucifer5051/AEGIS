@@ -3,6 +3,68 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 019] — 2026-10-01
+
+### Deterministic Authority Layer & Trust Core Foundation
+
+**Status:** IMPLEMENTED & VERIFIED — Full deterministic Trust Core foundation, HMAC-SHA256 capability tokens, fail-closed policy engine, append-only SQLite audit writer with zero-secret invariant, and schema migration 0005.  
+**Tests:** 275 passed · 0 failed · 0 skipped (100% offline inside AEGIS venv, 14.80s) — 51 new comprehensive adversarial & functional tests (`test_trust_core.py`)  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (59 files)  
+**Type Check:** `mypy` — 0 issues (57 source files)  
+**Commit:** `4d47e72`
+
+#### 1. Core Principle Enforcement
+- *"Intelligence proposes; deterministic authority decides."*
+- Full separation between LLM reasoning and authorization decisions. LLMs, model providers, skills, and agents are non-authorities and cannot grant themselves capabilities, modify policies, bypass checks, or access resources directly.
+- Strict fail-closed semantics: all errors, missing parameters, forged tokens, or unrecognised actions default to DENY or ESCALATE (never silent allow).
+- CRITICAL risk actions unconditionally require user approval (ESCALATE) across all autonomy tiers (Tier 0 to Tier 3).
+- `policy.change` is permanently hard-denied (`PolicyDeniedError`) across all autonomy tiers without an approval path.
+
+#### 2. Architecture & Modules Created (`src/trust/`)
+- **`src/trust/errors.py`**: Granular exception hierarchy rooted in `TrustError`:
+  - `CapabilityError` (subclasses: `CapabilityForgedError`, `CapabilityExpiredError`, `CapabilityRevokedError`, `CapabilityExhaustedError`, `CapabilityScopeError`).
+  - `AuthorizationError` (subclasses: `PolicyDeniedError`, `ApprovalRequiredError`, `ApprovalExpiredError`, `ApprovalRejectedError`).
+  - `AuditError`, `SecretLeakError`, `PolicyConfigurationError`.
+- **`src/trust/capability.py`**:
+  - `ActionRisk` enum (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`).
+  - `ResourceScope` frozen dataclass for boundary enforcement (`filesystem_prefixes`, `allowed_network_hosts`, `allowed_process_commands`, `project_id`) with normalized path traversal protection (`posixpath.normpath`).
+  - `Capability` frozen dataclass holding HMAC-SHA256 signature over canonical JSON payload.
+  - `CapabilityFactory` generating process-local 32-byte cryptographically secure random keys (`os.urandom(32)`).
+  - `CapabilityRegistry` tracking issued capabilities, in-process use counts, single-use/multi-use limits, and immediate revocation.
+- **`src/trust/policy.py`**:
+  - `AutonomyTier` enum (`0: STRICT_MANUAL`, `1: SAFE_BOUNDED`, `2: SUPERVISED`, `3: FULL_BOUNDED`).
+  - `PolicyDecision` enum (`ALLOW`, `ESCALATE`, `DENY`).
+  - `PolicyEngine` matching actions via longest prefix against canonical risk taxonomy (`_ACTION_RISK_TABLE`), defaulting unrecognised actions to `ActionRisk.CRITICAL`.
+- **`src/trust/audit.py`**:
+  - Append-only, tamper-evident audit log writer (`AuditWriter`) with immediate SQLite transaction writes.
+  - Hard invariant: zero secret/credential material logged (`_check_no_secrets` scans key names, string values, and patterns for API keys, passwords, bearer tokens, and private keys, raising `SecretLeakError`). SHA-256 digests and hashes remain permitted.
+- **`src/trust/authority.py`**:
+  - `TrustAuthority` orchestrating policy evaluation, capability token issuance, consumption validation, and audit recording. Fail-closed: audit logging failures raise `AuditError` blocking capability issuance.
+- **`src/trust/__init__.py`**:
+  - Public export of all domain types and `build_trust_authority()` factory function.
+
+#### 3. Database Migration (`migrations/0005_trust_core_schema.sql`)
+- Created migration 0005:
+  - `system_autonomy_policy`: Tracks global and project-scoped operational autonomy tiers.
+  - `approval_requests`: Tracks human-in-the-loop approval workflows, approval states (`PENDING`, `APPROVED`, `REJECTED`, `EXPIRED`), escalation tokens, and audit linkage.
+  - `audit_records`: Append-only audit trail capturing event types (`AUTHZ_REQUEST`, `AUTHZ_DECISION`, `CAPABILITY_ISSUED`, `CAPABILITY_CONSUMED`, `CAPABILITY_DENIED`, `CAPABILITY_REVOKED`, `POLICY_CHANGE`), decision outcomes, actors, actions, scopes, and sanitised telemetry.
+
+#### 4. Adversarial Test Suite (`tests/test_trust_core.py`)
+- 51 exhaustive tests spanning 5 categories:
+  - **TC-CAP (10 tests)**: Valid signatures, signature tampering rejection, cross-factory forgery rejection, TTL expiry, immediate revocation, use-count exhaustion, path/host/command scope boundaries, zero-scope boundary.
+  - **TC-POL (13 tests)**: Autonomy tiers 0-3 vs risk levels LOW-CRITICAL, hard-deny `policy.change`, unrecognised action critical default, tier/risk decoupling.
+  - **TC-AUDIT (7 tests)**: Record persistence, secret leakage rejection (`SecretLeakError`), API key/bearer token detection, SHA-256 digest acceptance, multiple record accumulation, redaction helper.
+  - **TC-AUTH (9 tests)**: Orchestrated flow for allow/escalate/deny, consume audit records, revocation audit, approved escalation flow, factory builder.
+  - **TC-ADV (12 tests)**: LLM self-authorization rejection, actor policy-change rejection, forged token consumption, replay attacks, path traversal attempts (`..`), network host wildcard injection, prompt injection in action strings, secrets in capability IDs, cross-project leakage, audit failure fail-closed behavior, expired/revoked precedence, policy change auditing.
+
+#### 5. Architectural Status
+- **DESIGNED:** Windows service broker, named pipe IPC, DPAPI/CNG hardware isolation adapter, Credential Broker, Tool Broker sandboxing.
+- **IMPLEMENTED:** Deterministic Authority Layer, Capability tokens with HMAC-SHA256, Action-Risk Taxonomy, Autonomy Tier evaluation, Append-only Audit logging with zero-secret protection, SQLite schema migration 0005.
+- **VERIFIED:** 51 Trust Core tests, 275 total system test suite passing 100% offline, ruff clean, mypy clean.
+- **DEFERRED:** Platform-specific Windows service & kernel IPC enforcement (kept behind abstract interfaces).
+
+---
+
 ## [Prompt 018] — 2026-10-01
 
 ### Controlled Model Provisioning & Empirical Hardware Qualification (Outcome B: Safe Defer)
