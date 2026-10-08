@@ -171,6 +171,9 @@ def test_13_no_unexpected_application_source():
         "model_policy",
         "trust",
         "tools",
+        "manager",
+        "reasoning",
+        "skills",
         "__pycache__",
     }
     for child in src_dir.iterdir():
@@ -181,8 +184,6 @@ def test_13_no_unexpected_application_source():
 
     forbidden_runtime_packages = {
         "trust_core",
-        "manager",
-        "skills",
         "memory",
         "scheduler",
         "database",

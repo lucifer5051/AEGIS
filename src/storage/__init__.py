@@ -10,6 +10,7 @@ Constraints:
 from src.storage.database import (
     SQLitePragmaConfig,
     create_connection,
+    initialize_runtime_database,
     open_database,
     transaction,
 )
@@ -94,6 +95,7 @@ __all__ = [
     # Database & Transactions
     "SQLitePragmaConfig",
     "create_connection",
+    "initialize_runtime_database",
     "open_database",
     "transaction",
     # Migrations

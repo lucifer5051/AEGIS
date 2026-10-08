@@ -30,6 +30,7 @@ import logging
 from typing import Optional
 from uuid import uuid4
 
+from src.trust.approval import ApprovalStore
 from src.trust.audit import AuditDecision, AuditEventType, AuditWriter
 from src.trust.capability import (
     Capability,
@@ -37,7 +38,10 @@ from src.trust.capability import (
     ResourceScope,
 )
 from src.trust.errors import (
+    ApprovalExpiredError,
+    ApprovalRejectedError,
     ApprovalRequiredError,
+    AuthorizationError,
     CapabilityError,
     PolicyDeniedError,
     TrustError,
@@ -55,6 +59,7 @@ class TrustAuthority:
       - PolicyEngine   -> classifies actions and decides allow/escalate/deny
       - CapabilityRegistry -> issues, tracks, and validates tokens
       - AuditWriter    -> persists every decision to the audit log
+      - ApprovalStore  -> persists and verifies human-in-the-loop approvals
 
     The authority is NOT a singleton; callers instantiate it per-session or
     per-component and inject the shared DB connection.
@@ -71,10 +76,12 @@ class TrustAuthority:
         policy: PolicyEngine,
         registry: CapabilityRegistry,
         auditor: AuditWriter,
+        approval_store: Optional[ApprovalStore] = None,
     ) -> None:
         self._policy = policy
         self._registry = registry
         self._auditor = auditor
+        self._approval_store = approval_store
 
     # ------------------------------------------------------------------
     # Public API
@@ -149,7 +156,18 @@ class TrustAuthority:
 
         # --- ESCALATE (approval required) ---
         if policy_result.decision == PolicyDecision.ESCALATE and approval_request_id is None:
-            req_id = str(uuid4())
+            if self._approval_store is not None:
+                record = self._approval_store.create_request(
+                    action_name=action_name,
+                    action_risk_level=policy_result.risk.value,
+                    target_resource=str(scope),
+                    parameters_summary=f"actor={actor}, project_id={project_id}",
+                    project_id=project_id,
+                )
+                req_id = record.request_id
+            else:
+                req_id = str(uuid4())
+
             self._safe_audit(
                 event_type=AuditEventType.AUTHZ_DECISION,
                 actor=actor,
@@ -170,6 +188,29 @@ class TrustAuthority:
                 f"Submit approval request {req_id!r}.",
                 request_id=req_id,
             )
+
+        # If an approval_request_id is supplied, verify it against the ApprovalStore if available
+        if approval_request_id is not None and self._approval_store is not None:
+            rec = self._approval_store.get_request(approval_request_id)
+            if rec is None:
+                raise AuthorizationError(f"Approval request {approval_request_id!r} not found.")
+            if rec.status == "REJECTED":
+                raise ApprovalRejectedError(
+                    f"Approval request {approval_request_id!r} was rejected."
+                )
+            if rec.is_expired():
+                raise ApprovalExpiredError(f"Approval request {approval_request_id!r} has expired.")
+            if rec.status != "APPROVED":
+                raise ApprovalRequiredError(
+                    f"Approval request {approval_request_id!r} is not approved "
+                    f"(status={rec.status!r}).",
+                    request_id=approval_request_id,
+                )
+            if rec.action_name != action_name:
+                raise AuthorizationError(
+                    f"Approval request {approval_request_id!r} was approved for action "
+                    f"'{rec.action_name}', not '{action_name}'."
+                )
 
         # --- ALLOW (or approved escalation) ---
         capability_id = str(uuid4())

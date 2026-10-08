@@ -1,6 +1,7 @@
 """SAGE Configuration Subsystem Public API."""
 
 from .loader import ConfigurationError, get_env_overrides, load_config
+from .logging import SecretRedactionFilter, setup_sage_logging
 from .models import (
     AegisConfig,
     AutonomyConfig,
@@ -58,4 +59,6 @@ __all__ = [
     "SystemConfig",
     "get_env_overrides",
     "load_config",
+    "setup_sage_logging",
+    "SecretRedactionFilter",
 ]

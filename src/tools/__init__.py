@@ -35,6 +35,13 @@ All other submodules can be imported directly if lower-level types are needed.
 """
 
 from src.tools.broker import ToolBroker
+from src.tools.builtin import (
+    FILE_LIST_TOOL,
+    FILE_READ_TOOL,
+    FILE_WRITE_TOOL,
+    PYTHON_EVAL_TOOL,
+    register_builtin_tools,
+)
 from src.tools.errors import (
     DuplicateToolError,
     OutputSanitizationError,
@@ -62,6 +69,11 @@ from src.tools.sanitizer import sanitize_output
 __all__ = [
     # Broker
     "ToolBroker",
+    "register_builtin_tools",
+    "FILE_WRITE_TOOL",
+    "FILE_READ_TOOL",
+    "FILE_LIST_TOOL",
+    "PYTHON_EVAL_TOOL",
     # Models
     "ParamType",
     "ToolDefinition",

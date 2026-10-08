@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "manifest_name": "qwen35-4b-q4km",
+  "manifest_type": "AEGIS_SOURCE_CONTROLLED_INTEGRITY_MANIFEST",
+  "manifest_version": "1.0.0",
+  "provider": "llamacpp",
+  "model_name": "qwen35-4b-q4km",
+  "model_architecture": "qwen35",
+  "parameter_count": "4B",
+  "quantization": "Q4_K_M",
+  "context_window_tokens": 262144,
+  "aegis_token_budget_ceiling": 4096,
+  "offline_policy": {
+    "network_egress_permitted": false,
+    "local_files_only": true,
+    "remote_api_permitted": false,
+    "server_mode_permitted": false
+  },
+  "required_files": {
+    "qwen35-4b-q4km.gguf": {
+      "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+      "size_bytes": 2740937888,
+      "required": true,
+      "description": "Quantized GGUF artifact for local reasoning"
+    }
+  },
+  "compatibility": {
+    "aegis_provider": "src/reasoning/provider.py",
+    "aegis_runtime": "src/reasoning/runtime.py",
+    "runtime_family": "llamacpp"
+  },
+  "qualification_policy": {
+    "hardware_qualification": "MEASURED_PROBE_LOAD_AND_LATENCY"
+  }
+}

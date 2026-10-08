@@ -3,6 +3,94 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 021B] — 2026-10-01
+
+### Phase 5: SAGE Local Reasoning Model Provisioning
+
+**Status:** IMPLEMENTED & VERIFIED — Qualified local quantized GGUF provisioned to SAGE-owned storage, llama-cpp-python runtime integrated, provider-neutral reasoning abstraction implemented, memory admission and residency policy integrated, offline deterministic smoke test verified, empirical qualification persisted.  
+**Tests:** 362 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~36.7s) — 11 new Local Reasoning tests (`tests/test_local_reasoning.py`)  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (82 files)  
+**Type Check:** `mypy` — 0 issues (80 source files)  
+
+#### A. Model Provisioning & Integrity Verification
+- Created SAGE-managed model directory outside OneDrive, repository, and C:\AEGIS:
+  `%USERPROFILE%\.aegis\models\local-llm\qwen35\`
+- Copied qualified artifact to SAGE-owned path: `qwen35-4b-q4km.gguf`
+- Verified artifact properties:
+  - Exact byte size: 2,740,937,888 bytes
+  - SHA-256: `00FE7986FF5F6B463E62455821146049DB6F9313603938A70800D1FB69EF11A4`
+  - GGUF architecture: `qwen35`, Q4_K_M quantization, 248,320 vocab tokens
+- Original Meetly installation untouched and unmodified. No runtime dependency on Meetly or helper daemons.
+
+#### B. Provider-Neutral Local Reasoning Abstraction (`src/reasoning/`)
+- Created provider-neutral subsystem:
+  - `src/reasoning/base.py`: `LocalReasoningProvider` abstract base class defining lifecycle (`initialize`, `is_ready`, `reason`, `unload`, `verify_integrity`, `get_metrics`).
+  - `src/reasoning/models.py`: Typed Pydantic schemas (`ReasoningRequest`, `ReasoningResponse`, `ReasoningMetrics`, `ReasoningProviderStatus`).
+  - `src/reasoning/errors.py`: Typed fail-closed error hierarchy (`ReasoningError`, `ReasoningStorageError`, `ReasoningIntegrityError`, `ReasoningAdmissionError`, `ReasoningExecutionError`, `ReasoningResidencyError`).
+  - `src/reasoning/runtime.py`: Canonical runtime descriptor (`LLAMACPP_CPU_RUNTIME`), model descriptor (`QWEN35_4B_MODEL`), and skill profile (`SKILL_LOCAL_REASONING`).
+  - `src/reasoning/provider.py`: `LlamaCppReasoningProvider` implementing CPU inference, streaming time-to-first-token (TTFT) measurement, deterministic temperature=0.0 generation, and storage boundary validation.
+  - `src/reasoning/qualification.py`: Live empirical hardware qualification via `ModelHardwareQualifier`, saving profile to `%USERPROFILE%\.aegis\models\qualifications\qwen35-4b-q4km.qualification.json`.
+  - `src/reasoning/__init__.py`: Public API exports and `build_default_reasoning_provider` factory.
+
+#### C. Model Policy & Admission Integration
+- Integrated with `SkillConcurrencyManager`: Dynamic RAM gating checks available host memory against 1.5 GB system reserve before admitting model weights. Fails closed with `ReasoningAdmissionError` if headroom is insufficient.
+- Integrated with `ModelResidencyManager`: Tracks resident status, reference-counts active skill execution leases, and strictly blocks model eviction while active leases exist.
+- Separated from Fast Decision Engine: Intended strictly for local Manager/reasoning inference; Fast Decision Engine remains advisory intent router.
+
+#### D. Offline Smoke Test & Quality Gates
+- Offline deterministic reasoning smoke test verified:
+  - Cold load latency: ~1.8s
+  - Time-To-First-Token (TTFT): ~600-630ms
+  - Total inference latency: ~670-810ms (deterministic output verified)
+  - Clean unload confirmed (zero memory leaks, residency cleared)
+- Empirical hardware qualification profile persisted:
+  - Measured resident RAM: ~2,740 MB
+  - Measured marginal RAM: ~1,343 MB
+  - Measured p95 latency: ~661 ms
+  - Status: `QUALIFIED`
+
+## [Prompt 021] — 2026-10-01
+
+### Phase 5: Unified Supervisor + Execution State Recovery
+
+**Status:** IMPLEMENTED & VERIFIED — Full Unified Supervisor and Execution State Recovery subsystem (`src/manager/`), SQLite migration `0006_task_execution_recovery_schema.sql`, crash discovery & idempotent recovery engine, and end-to-end integration tests.  
+**Tests:** 351 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~16.0s) — 24 new Supervisor / Manager recovery tests (`tests/test_manager_recovery.py`)  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (74 files)  
+**Type Check:** `mypy` — 0 issues (72 source files)  
+
+#### A. Database Migration (`migrations/0006_task_execution_recovery_schema.sql`)
+- Created 4 durable tables:
+  - `supervisor_sessions`: Session lifecycle (`INITIALIZING`, `ACTIVE`, `RECONCILING`, `COMPLETED`, `FAILED`, `ABORTED`), metadata, error tracking.
+  - `tasks`: Task state machine (`PENDING`, `PLANNING`, `EXECUTING`, `AWAITING_APPROVAL`, `COMPLETED`, `FAILED`, `CANCELLED`), priority, advisory route, error summary.
+  - `task_steps`: Ordered execution steps (`PENDING`, `RUNNING`, `AWAITING_APPROVAL`, `COMPLETED`, `FAILED`, `SKIPPED`), action risk level, capability token ID, idempotency tracking, sanitized results.
+  - `task_checkpoints`: Point-in-time recovery snapshots ordered monotonically (`checkpoint_seq`), with zero-secret snapshot verification.
+- Enforced strict foreign keys, cascade rules, composite unique indexes (`UNIQUE(task_id, step_index)`, `UNIQUE(task_id, checkpoint_seq)`), and ISO 8601 UTC timestamps.
+
+#### B. Manager Subsystem (`src/manager/`)
+- **`src/manager/errors.py`**: Fail-closed exception hierarchy rooted in `ManagerError` (`StateTransitionError`, `TaskNotFoundError`, `StepNotFoundError`, `SessionNotFoundError`, `SecretLeakError`, `ReconciliationError`, `SupervisorExecutionError`).
+- **`src/manager/models.py`**: Frozen Pydantic models and immutable enums. Implements valid state transition tables `VALID_TASK_TRANSITIONS` and `VALID_STEP_TRANSITIONS`, supporting human approval escalation workflows.
+- **`src/manager/state_store.py`**: ACID SQLite state store utilizing `BEGIN IMMEDIATE` transactions to prevent concurrency conflicts. Enforces zero-secret policy via regex scanning on titles, metadata, arguments, snapshots, and error summaries. Sanitizes strings on read and write.
+- **`src/manager/reconciliation.py`**: Startup crash recovery engine (`ReconciliationEngine`):
+  - Discovers interrupted in-flight tasks (`EXECUTING`, `PLANNING`, `RUNNING` steps).
+  - Idempotent steps with matching completed checkpoints are safely marked `COMPLETED`.
+  - Incomplete idempotent steps are safely reset to `PENDING` for re-execution.
+  - Ambiguous non-idempotent steps without checkpoints are escalated to `AWAITING_APPROVAL` with clear error summaries, strictly preventing duplicate side effects.
+  - Corrupt or empty executing tasks safely transition to `FAILED` (fail closed).
+  - Re-running reconciliation on stable database is provably idempotent.
+- **`src/manager/supervisor.py`**: Central coordinator (`Supervisor`):
+  - Plans tasks with ordered step definitions.
+  - Queries `FastDecisionService` for advisory route suggestions (`is_advisory_only: Literal[True]` invariant strictly upheld).
+  - Evaluates action risk with `TrustAuthority` (`evaluate_action_risk`).
+  - Automatically executes approved steps via `ToolBroker` (`dispatch_tool`) or escalates unauthorized steps to `AWAITING_APPROVAL`.
+  - Captures durable snapshots into `task_checkpoints` before and after dispatch.
+  - Allows human operators to approve pending actions and resume execution.
+- **`src/manager/__init__.py`**: Clean domain exports and `build_supervisor` factory helper.
+
+#### C. Test Suite & Validation
+- Added `tests/test_manager_recovery.py` with 24 comprehensive tests covering state machine transitions, store persistence, secret rejection, reconciliation scenarios, and end-to-end supervisor tool dispatch.
+- Updated `tests/test_domain_schema.py` (55 tests) to expect schema version 6 and validate the 4 new tables.
+- Updated `tests/test_environment_validation.py` (13 tests) recognizing `manager` as a canonical runtime package.
+
 ## [Prompt 020] — 2026-10-01
 
 ### Project Identity Migration (AEGIS → SAGE) + Tool Broker & Sandboxed Execution Foundation

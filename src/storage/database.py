@@ -169,3 +169,41 @@ def transaction(
         raise
     finally:
         cursor.close()
+
+
+def initialize_runtime_database(
+    db_path: Optional[Path | str] = None,
+    migrations_dir: Optional[Path | str] = None,
+) -> sqlite3.Connection:
+    """Initialize and migrate the canonical SAGE SQLite database.
+
+    1. Resolves path to %USERPROFILE%\\.aegis\\data\\aegis.db if not specified.
+    2. Validates path against strict storage boundaries (anti-OneDrive, anti-repo, anti-C:\\AEGIS).
+    3. Ensures parent directory exists.
+    4. Establishes connection with WAL journal mode, NORMAL synchronous, foreign keys.
+    5. Loads and applies all pending migrations monotonically.
+
+    Returns:
+        Active, fully migrated sqlite3.Connection.
+    """
+    from src.storage.migrations import apply_migrations, load_migrations_from_directory
+    from src.storage.paths import get_default_db_path, validate_database_path
+
+    target_path = Path(db_path) if db_path is not None else get_default_db_path()
+    validated_path = validate_database_path(target_path)
+    validated_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = create_connection(validated_path)
+
+    # Resolve migrations directory
+    if migrations_dir is not None:
+        mig_dir = Path(migrations_dir)
+    else:
+        # Canonical repo root / migrations
+        mig_dir = Path(__file__).resolve().parent.parent.parent / "migrations"
+
+    if mig_dir.is_dir():
+        migrations = load_migrations_from_directory(mig_dir)
+        apply_migrations(conn, migrations, database_path=validated_path)
+
+    return conn

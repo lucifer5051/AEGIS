@@ -143,6 +143,10 @@ class ToolBroker:
         """Return the names of all registered tools (sorted)."""
         return sorted(self._tools)
 
+    def list_tools(self) -> Dict[str, ToolDefinition]:
+        """Return all registered tool definitions keyed by name."""
+        return dict(self._tools)
+
     def get_definition(self, tool_name: str) -> ToolDefinition:
         """Return the ToolDefinition for *tool_name*.
 
