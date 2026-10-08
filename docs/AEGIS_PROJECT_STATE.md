@@ -162,7 +162,7 @@ src/storage/paths.py::validate_database_path().
 | 019 | Deterministic Authority Layer and Trust Core foundation | 4d47e72 | 2026-10-01 | Capability tokens, policy engine, audit log, migration 0005 | 275 tests pass |
 | 020 | SAGE Identity Migration + Tool Broker & Sandboxed Execution Foundation | `54e46b1` | 2026-10-01 | Full SAGE identity migration, Tool Broker subsystem (`src/tools/`), 46 tool tests + 5 identity tests | 327 tests pass (100% offline, 0 failures) |
 | 021 | Unified Supervisor + Execution State Recovery | `530077e` | 2026-10-01 | Unified Supervisor (`src/manager/`), Migration 0006, crash recovery & idempotent reconciliation, 24 new tests | 351 tests pass (100% offline, 0 failures) |
-| **022** | **Phase 6 — Skills Architecture & Tool Integration** | staged | **2026-10-08** | **`src/skills/` (11 modules): SkillManifest, SkillRegistry, lifecycle state machine, BoundSkillToolBroker, DeterministicSkillExecutor, SkillAdmissionController, ClarificationGate, ExperienceFeedbackService, SkillCheckpointMetadata, ToolDiscoveryService, validation. Adaptive Execution & Experience interfaces. Agent loop e2e, approval lifecycle, local reasoning tests.** | **394 tests pass (100% offline, 0 failures)** |
+| **022** | **Phase 6 — Skills Architecture & Tool Integration** | `c59a7bb` | **2026-10-08** | **`src/skills/` (11 modules): SkillManifest, SkillRegistry, lifecycle state machine, BoundSkillToolBroker, DeterministicSkillExecutor, SkillAdmissionController, ClarificationGate, ExperienceFeedbackService, SkillCheckpointMetadata, ToolDiscoveryService, validation. Adaptive Execution & Experience interfaces. Agent loop e2e, approval lifecycle, local reasoning tests.** | **394 tests pass (100% offline, 0 failures)** |
 
 ---
 
