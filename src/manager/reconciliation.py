@@ -93,6 +93,9 @@ class ReconciliationEngine:
         )
         return report
 
+    # Backward-compatible alias
+    reconcile_on_startup = reconcile_startup
+
     def _reconcile_single_task(self, task: TaskRecord) -> ReconciledTaskResult:
         """Reconcile an individual in-flight task."""
         try:

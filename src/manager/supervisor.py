@@ -712,6 +712,11 @@ class Supervisor:
         registered_skill = self._skill_registry.get_skill(invocation.skill_id)
         manifest = registered_skill.manifest
 
+        if registered_skill.current_state == SkillLifecycleState.AVAILABLE:
+            self._skill_registry.transition_lifecycle(
+                manifest.skill_id, SkillLifecycleState.SELECTED
+            )
+
         admission = None
         if self._admission_controller is not None:
             admission = self._admission_controller.evaluate_admission(manifest)
@@ -731,17 +736,9 @@ class Supervisor:
                 )
 
         try:
-            if registered_skill.current_state in (
-                SkillLifecycleState.AVAILABLE,
-                SkillLifecycleState.SELECTED,
-            ):
-                if registered_skill.current_state == SkillLifecycleState.AVAILABLE:
-                    self._skill_registry.transition_lifecycle(
-                        manifest.skill_id, SkillLifecycleState.SELECTED
-                    )
-                self._skill_registry.transition_lifecycle(
-                    manifest.skill_id, SkillLifecycleState.ADMITTED
-                )
+            self._skill_registry.transition_lifecycle(
+                manifest.skill_id, SkillLifecycleState.ADMITTED
+            )
             self._skill_registry.transition_lifecycle(
                 manifest.skill_id, SkillLifecycleState.EXECUTING
             )

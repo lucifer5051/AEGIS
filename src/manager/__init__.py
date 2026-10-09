@@ -44,13 +44,14 @@ from src.manager.models import (
 )
 from src.manager.reconciliation import ReconciliationEngine
 from src.manager.state_store import StateStore
-from src.manager.supervisor import Supervisor
+from src.manager.supervisor import GoalExecutionResult, Supervisor
 from src.tools.broker import ToolBroker
 from src.trust.authority import TrustAuthority
 
 __all__ = [
     # Models & Enums
     "CheckpointSnapshot",
+    "GoalExecutionResult",
     "ReconciledTaskResult",
     "ReconciliationReport",
     "RecoveryDisposition",
@@ -86,12 +87,24 @@ def build_supervisor(
     trust_authority: TrustAuthority,
     tool_broker: ToolBroker,
     fast_decision: Optional[FastDecisionService] = None,
+    skill_registry: Optional[object] = None,
+    clarification_gate: Optional[object] = None,
+    admission_controller: Optional[object] = None,
+    experience_service: Optional[object] = None,
 ) -> Supervisor:
-    """Convenience factory to wire up a Supervisor with a fresh StateStore."""
+    """Convenience factory to wire up a Supervisor with a fresh StateStore.
+
+    All skills-related subsystems are optional; omit them for plain
+    tool-broker-only operation.
+    """
     store = StateStore(conn)
     return Supervisor(
         state_store=store,
         trust_authority=trust_authority,
         tool_broker=tool_broker,
         fast_decision=fast_decision,
+        skill_registry=skill_registry,
+        clarification_gate=clarification_gate,
+        admission_controller=admission_controller,
+        experience_service=experience_service,
     )
