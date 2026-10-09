@@ -3,6 +3,60 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 023] — 2026-10-09
+
+### End-to-End Skill Execution, Verification & State Recovery Pipeline
+
+**Status:** IMPLEMENTED & VERIFIED — Full integration of User Goal -> ClarificationGate -> Supervisor -> SkillRegistry -> SkillAdmissionController -> BoundSkillToolBroker -> ToolBroker -> TrustCore -> Verifier -> Checkpoint/Reconciliation -> ExperienceEvent pipeline.  
+**Tests:** 418 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~43.5s) — 24 new pipeline integration tests (`tests/test_integration_skills_execution.py`)  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (107 files)  
+**Type Check:** `mypy` — 0 issues (105 source files)  
+
+#### A. Supervisor & Skills Pipeline Integration
+- Connected `Supervisor.execute_skill()` to `SkillAdmissionController` with strict lifecycle transitions (`AVAILABLE -> SELECTED -> ADMITTED -> EXECUTING -> VERIFYING -> SUCCEEDED -> AVAILABLE`).
+- Wired `Supervisor.select_skill()` to `SkillRegistry` deterministic intent matching.
+- Wired `ClarificationGate` short-circuiting on incomplete or empty goals prior to any LLM invocation.
+- Exported `GoalExecutionResult` in public `src.manager` API.
+- Added `reconcile_on_startup` alias to `ReconciliationEngine` for consistent startup recovery invocation.
+
+#### B. Security & Boundary Guarantees
+- Validated that `BoundSkillToolBroker` strictly blocks undeclared tools (`SkillToolAccessDeniedError`).
+- Verified that unknown tools not present in `ToolBroker` catalog are rejected (`ToolNotFoundError`).
+- Verified that `TrustCore` autonomously denies or escalates unpermitted actions even if declared in skill bindings (`AutonomyTier.STRICT_MANUAL`).
+- Ensured zero secret leakage in `ExperienceEvent` payloads and `SkillCheckpointMetadata` persistence (`SecretLeakError`).
+
+#### C. Verification & Recovery Guarantees
+- Demonstrated post-tool-execution semantic verification failure (`StepVerifier` catches failure even when tool returns `SUCCESS`).
+- Ensured non-idempotent side-effect steps are never automatically retried during recovery.
+- Re-authorization via `TrustCore` enforced on every retry step.
+- Persisted and reconstructed checkpoint execution state via `ReconciliationEngine`.
+
+#### D. Telemetry & Fast Path
+- Verified `ExperienceEvent` classification distinguishing `USER_CORRECTED` from execution failures and `NO_FEEDBACK` from assumed success.
+- Verified deterministic fast path for skill execution with zero LLM reasoning invocations.
+- Verified 100% offline execution with zero socket/network operations.
+
+## [Prompt 022] — 2026-10-08
+
+### Phase 6: SAGE Skills Architecture & Tool Integration Foundation
+
+**Status:** IMPLEMENTED & VERIFIED — Declarative SkillManifest schema, deterministic manifest validation, fail-closed SkillRegistry, BoundSkillToolBroker, DeterministicSkillExecutor, SkillAdmissionController, ClarificationGate, ExperienceFeedbackService, and SkillCheckpoint boundary.  
+**Tests:** 394 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~40.8s) — 20 new Skills subsystem tests (`tests/test_skills.py`), plus approval lifecycle and manager recovery tests.  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (106 files)  
+**Type Check:** `mypy` — 0 issues (104 source files)  
+
+#### A. Declarative Skills Architecture (`src/skills/`)
+- Implemented `SkillManifest` model with strict SemVer, regex identifier validation, risk classes, and resource declarations.
+- Enforced security invariant: Skills cannot define or override Trust Core policies.
+- Implemented fail-closed `SkillRegistry` with deterministic lifecycle state machine (`AVAILABLE`, `SELECTED`, `ADMITTED`, `EXECUTING`, `VERIFYING`, `SUCCEEDED`, `FAILED`, `RECOVERY`).
+- Implemented `BoundSkillToolBroker` scoped tool gateway.
+
+#### B. Admission, Clarification & Telemetry Foundations
+- Implemented `SkillAdmissionController` leveraging `SkillConcurrencyManager` and `ModelResidencyManager`.
+- Implemented `ClarificationGate` with deterministic prompt generation.
+- Implemented `ExperienceFeedbackService` recording decoupled `ExperienceEvent` records without automatic model self-modification.
+- Implemented `SkillCheckpointMetadata` and `persist_skill_checkpoint` integration with `StateStore`.
+
 ## [Prompt 021B] — 2026-10-01
 
 ### Phase 5: SAGE Local Reasoning Model Provisioning
