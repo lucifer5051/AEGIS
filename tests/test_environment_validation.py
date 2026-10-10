@@ -162,6 +162,8 @@ def test_13_no_unexpected_application_source():
     assert src_dir.is_dir(), "src directory missing"
     # In Prompt 019, src/trust/ is authorized in addition to previous modules.
     # In Prompt 020, src/tools/ (Tool Broker) is authorized.
+    # In Prompt 021-023, src/manager/, src/reasoning/, src/skills/ are authorized.
+    # In Prompt 024, src/memory/ (EKM Memory Runtime) is authorized.
     allowed_subdirs = {
         "config",
         "hardware",
@@ -174,6 +176,7 @@ def test_13_no_unexpected_application_source():
         "manager",
         "reasoning",
         "skills",
+        "memory",
         "__pycache__",
     }
     for child in src_dir.iterdir():
@@ -184,7 +187,6 @@ def test_13_no_unexpected_application_source():
 
     forbidden_runtime_packages = {
         "trust_core",
-        "memory",
         "scheduler",
         "database",
         "channels",

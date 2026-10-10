@@ -19,7 +19,7 @@ Core Invariants:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from src.decision.models import FastDecisionRequest, RequestContext
 from src.decision.service import FastDecisionService
@@ -70,6 +70,8 @@ class Supervisor:
         clarification_gate: Optional[Any] = None,
         admission_controller: Optional[Any] = None,
         experience_service: Optional[Any] = None,
+        memory_store: Optional[Any] = None,
+        retriever: Optional[Any] = None,
     ) -> None:
         """Initialize supervisor with required subsystems.
 
@@ -87,6 +89,8 @@ class Supervisor:
             clarification_gate: Optional deterministic ClarificationGate.
             admission_controller: Optional SkillAdmissionController.
             experience_service: Optional ExperienceFeedbackService.
+            memory_store: Optional Experience & Knowledge Memory (EKM) store.
+            retriever: Optional selective EKM retriever.
         """
         self._store = state_store
         self._authority = trust_authority
@@ -100,11 +104,46 @@ class Supervisor:
         self._synthesizer = synthesizer or (
             TaskSynthesizer(reasoning_provider) if reasoning_provider else None
         )
-        self._context_assembler = context_assembler or ContextAssembler()
+        self._memory_store = memory_store
+        self._retriever = retriever
+        if context_assembler is not None:
+            self._context_assembler = context_assembler
+        elif memory_store is not None or retriever is not None:
+            self._context_assembler = ContextAssembler(
+                memory_store=memory_store,
+                retriever=retriever,
+            )
+        else:
+            self._context_assembler = ContextAssembler()
         self._skill_registry = skill_registry
         self._clarification_gate = clarification_gate
         self._admission_controller = admission_controller
         self._experience_service = experience_service
+
+    @property
+    def context_assembler(self) -> ContextAssembler:
+        """Return the active ContextAssembler."""
+        return self._context_assembler
+
+    @property
+    def memory_store(self) -> Optional[Any]:
+        """Return the active EKM memory store, if configured."""
+        return self._memory_store
+
+    def assemble_context(
+        self,
+        goal: str,
+        project_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        additional_constraints: Optional[List[str]] = None,
+    ) -> Any:
+        """Assemble bounded ContextIR for reasoning and planning."""
+        return self._context_assembler.assemble(
+            goal=goal,
+            project_id=project_id,
+            task_id=task_id,
+            additional_constraints=additional_constraints,
+        )
 
     # ==========================================================================
     # TASK CREATION & PLANNING

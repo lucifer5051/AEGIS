@@ -13,7 +13,7 @@ Invariants:
 from __future__ import annotations
 
 import sqlite3
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -73,8 +73,38 @@ class ContextIR(BaseModel):
 class ContextAssembler:
     """Assembles ContextIR instances from goal text and local storage."""
 
-    def __init__(self, conn: Optional[sqlite3.Connection] = None) -> None:
+    def __init__(
+        self,
+        conn: Optional[sqlite3.Connection] = None,
+        memory_store: Optional[Any] = None,
+        retriever: Optional[Any] = None,
+        compiler: Optional[Any] = None,
+    ) -> None:
         self._conn = conn
+        self._store = memory_store
+        self._retriever = retriever
+        if self._retriever is None and self._store is not None:
+            from src.memory.retriever import EKMRetriever
+
+            self._retriever = EKMRetriever(self._store)
+        elif self._retriever is None and self._conn is not None:
+            try:
+                from src.memory.retriever import EKMRetriever
+                from src.memory.store import EKMMemoryStore
+
+                self._store = EKMMemoryStore(self._conn)
+                self._retriever = EKMRetriever(self._store)
+            except Exception:
+                pass
+
+        self._compiler = compiler
+        if self._compiler is None:
+            try:
+                from src.memory.compiler import ContextCompiler
+
+                self._compiler = ContextCompiler()
+            except Exception:
+                pass
 
     def assemble(
         self,
@@ -84,6 +114,30 @@ class ContextAssembler:
         additional_constraints: Optional[List[str]] = None,
     ) -> ContextIR:
         """Assemble a bounded ContextIR object without dumping arbitrary database contents."""
+        # 1. Prefer full EKM selective retrieval and compilation if retriever is wired
+        if self._retriever is not None and self._compiler is not None:
+            try:
+                from src.memory.models import MemoryQuery
+
+                query = MemoryQuery(
+                    query_text=goal,
+                    project_id=project_id,
+                    task_id=task_id,
+                    limit=10,
+                )
+                retrieval = self._retriever.retrieve(query)
+                compiled = self._compiler.compile(
+                    goal=goal,
+                    retrieval=retrieval,
+                    task_id=task_id,
+                    additional_constraints=additional_constraints,
+                )
+                if isinstance(compiled.context_ir, ContextIR):
+                    return compiled.context_ir
+            except Exception:
+                pass
+
+        # 2. Fallback to basic connection-level queries or safe defaults
         preferences: List[str] = []
         facts: List[str] = []
         events: List[str] = []
@@ -95,21 +149,24 @@ class ContextAssembler:
         if additional_constraints:
             constraints.extend(additional_constraints)
 
-        # Attempt to read bounded preferences if DB connection exists and table present
         if self._conn is not None:
             try:
                 cursor = self._conn.execute(
-                    "SELECT preference_key, preference_value FROM user_preferences LIMIT 5;"
+                    "SELECT preference_key, preference_value FROM user_preferences "
+                    "WHERE is_superseded = 0 LIMIT 5;"
                 )
                 for row in cursor.fetchall():
                     preferences.append(f"{row[0]}: {row[1]}")
             except Exception:
-                pass  # Fall back gracefully if table not yet populated
+                pass
 
             try:
-                cursor = self._conn.execute("SELECT fact_text FROM memory_facts LIMIT 5;")
+                cursor = self._conn.execute(
+                    "SELECT subject, predicate, object FROM memory_facts "
+                    "WHERE is_superseded = 0 LIMIT 5;"
+                )
                 for row in cursor.fetchall():
-                    facts.append(str(row[0]))
+                    facts.append(f"{row[0]} {row[1]} {row[2]}")
             except Exception:
                 pass
 

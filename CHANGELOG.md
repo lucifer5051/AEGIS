@@ -3,6 +3,43 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 024] — 2026-10-10
+
+### Experience & Knowledge Memory (EKM) Runtime, Selective Retrieval & Context IR
+
+**Status:** IMPLEMENTED & VERIFIED — Full implementation and integration of Experience & Knowledge Memory (EKM) runtime (`src/memory/store.py`), derived FTS5 indexing (`src/memory/indexer.py`), multi-stage selective retrieval pipeline (`src/memory/retriever.py`), bounded Context IR compilation (`src/memory/compiler.py`), and optional semantic backend abstraction (`src/memory/semantic.py`). Fully integrated with `ContextAssembler` and `Supervisor`.  
+**Tests:** 442 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~43.5s) — 24 new EKM runtime & retrieval tests (`tests/test_ekm_memory_runtime.py`)  
+**Lint:** `ruff check` — 0 errors · `ruff format --check` — clean (115 files)  
+**Type Check:** `mypy` — 0 issues (95 source files)  
+
+#### A. Authoritative Typed Persistence & Secret Protection
+- Created `EKMMemoryStore` managing canonical relational SQLite tables (`memory_facts`, `user_preferences`, `entities`, `entity_relationships`, `memory_evidence`).
+- Enforced zero secret leakage via `_check_no_secrets` raising `SecretLeakError` on credentials, API keys, bearer tokens, or private keys across all write paths.
+- Preserved historical records via explicit supersession tracking (`supersede_fact`, `supersede_preference`).
+- Enforced frozen provenance trust levels M0–M4 (`MemoryTrustLevel`).
+
+#### B. Derived Full-Text Search (FTS5) Indexing
+- Implemented `FTS5IndexManager` operating auxiliary virtual table `ekm_fts` (`tokenize='porter unicode61'`).
+- Invariant upheld: derived index is 100% rebuildable from authoritative relational tables via `rebuild_index()`.
+- Added `sanitize_fts5_query()` preventing malformed punctuation/syntax crashes and expanding camelCase tokens for bidirectional matching.
+- Integrated `is_superseded` auxiliary state in FTS5 index with `mark_superseded()`.
+
+#### C. Multi-Stage Selective Retrieval
+- Implemented `EKMRetriever` covering:
+  1. Scope boundary filtering (`project_id`, global fallback, strict project isolation).
+  2. Temporal validity filtering (`valid_from <= as_of_time <= valid_until`, active vs expired, supersession handling).
+  3. FTS5 lexical matching combined with entity canonical slug matching.
+  4. Entity relationship graph traversal up to `max_relationship_depth`.
+  5. Trust-aware ranking combining BM25 score, trust weights (M0=0.2 to M4=1.0), epistemic confidence, importance, and project-specificity bonus.
+  6. Deduplication and conflict detection: flags opposing facts and opposing preferences in `unresolved_conflicts`.
+  7. Detailed provenance attribution map per returned record.
+
+#### D. Bounded Context IR Compilation & Manager Integration
+- Implemented `ContextCompiler` converting retrieval results into bounded `ContextIR` instances within explicit token budgets (`context_token_budget`).
+- Integrated deterministic token estimation with uncertainty bounds (±15%) and omission tracking (`omitted_record_ids`).
+- Enhanced `ContextAssembler` and `Supervisor` with optional `memory_store` / `retriever` wiring, enabling seamless context assembly for planning while retaining 100% backward compatibility.
+- Designed `SemanticMemoryBackend` protocol with `NullSemanticBackend` reporting status `DESIGNED` without network/GPU dependencies.
+
 ## [Prompt 023] — 2026-10-09
 
 ### End-to-End Skill Execution, Verification & State Recovery Pipeline
