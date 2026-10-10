@@ -52,6 +52,15 @@ from src.skills.experience import (
     ExperienceOutcomeType,
     UserFeedbackType,
 )
+from src.skills.first_party import (
+    DEV_VERIFY_MANIFEST,
+    RESEARCH_DIAGNOSE_MANIFEST,
+    WORKSPACE_INSPECT_MANIFEST,
+    dev_verify_handler,
+    register_first_party_skills,
+    research_diagnose_handler,
+    workspace_inspect_handler,
+)
 from src.skills.models import (
     ConcurrencyPolicy,
     ExecutionStrategy,
@@ -99,6 +108,17 @@ __all__ = [
     "BoundSkillToolBroker",
     "SkillExecutor",
     "DeterministicSkillExecutor",
+    # First-Party Skills
+    "WORKSPACE_INSPECT_MANIFEST",
+    "DEV_VERIFY_MANIFEST",
+    "RESEARCH_DIAGNOSE_MANIFEST",
+    "workspace_inspect_handler",
+    "dev_verify_handler",
+    "research_diagnose_handler",
+    "register_first_party_skills",
+    # Golden Task Evaluation
+    "GoldenTaskRecord",
+    "GoldenTaskEvaluator",
     # Admission & Concurrency
     "SkillAdmissionController",
     "AdmissionDecision",
@@ -107,7 +127,6 @@ __all__ = [
     "ClarificationAction",
     "ClarificationReason",
     "ClarificationResult",
-    # Experience & Adaptive Execution
     "ExperienceEvent",
     "ExperienceOutcomeType",
     "UserFeedbackType",
@@ -130,3 +149,13 @@ __all__ = [
     "ClarificationError",
     "FeedbackError",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name in ("GoldenTaskEvaluator", "GoldenTaskRecord"):
+        from src.skills.evaluation import GoldenTaskEvaluator, GoldenTaskRecord
+
+        if name == "GoldenTaskEvaluator":
+            return GoldenTaskEvaluator
+        return GoldenTaskRecord
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

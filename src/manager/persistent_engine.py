@@ -240,12 +240,12 @@ class PersistentExecutionEngine:
                 if tool_result.status == ToolResultStatus.SUCCESS:
                     # Verify output via verifier
                     obs = StepObservation.from_tool_result(
-                        step_number=pending_step.step_index,
+                        step_number=pending_step.step_index + 1,
                         tool_name=pending_step.tool_name or pending_step.action_name,
                         result=tool_result,
                     )
                     ps = PlannedStep(
-                        step_number=pending_step.step_index,
+                        step_number=pending_step.step_index + 1,
                         description=pending_step.action_name,
                         tool=pending_step.tool_name or pending_step.action_name,
                         arguments=pending_step.arguments,

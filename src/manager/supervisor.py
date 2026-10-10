@@ -965,6 +965,12 @@ class Supervisor:
         registered_skill = self._skill_registry.get_skill(invocation.skill_id)
         manifest = registered_skill.manifest
 
+        if registered_skill.current_state == SkillLifecycleState.FAILED:
+            self._skill_registry.transition_lifecycle(
+                manifest.skill_id, SkillLifecycleState.AVAILABLE
+            )
+            registered_skill = self._skill_registry.get_skill(invocation.skill_id)
+
         if registered_skill.current_state == SkillLifecycleState.AVAILABLE:
             self._skill_registry.transition_lifecycle(
                 manifest.skill_id, SkillLifecycleState.SELECTED

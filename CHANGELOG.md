@@ -3,6 +3,40 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 031] — 2026-10-10
+
+### First-Party Skills & End-to-End SAGE Demonstration
+
+**Status:** IMPLEMENTED & VERIFIED — Developed three bounded, verifiable first-party skills (`workspace.inspect`, `dev.verify`, `research.diagnose`) and proved their integration through SAGE's complete end-to-end execution architecture. Validated the full lifecycle: User Request -> Persistent Mode Selection -> Context Briefing -> User Confirmation -> Planning -> Skill Selection -> Trust Core Authorization -> Tool Execution -> Observation -> Verification -> Error Diagnosis -> Local/Online Research -> Hypothesis Testing & Rejection -> Alternative Strategy Selection -> Independent Verification -> Checkpointing -> Verified Completion -> Experience Recording -> Simulated Restart Recovery. Built a reusable 7-task Golden-Task evaluation harness (`GoldenTaskEvaluator`) covering read-only inspection, search & summarization, controlled test execution, recovery from transient failures, researching unfamiliar errors, resuming checkpointed tasks across restart, and handling ambiguous requests via clarification.
+**Tests:** 617 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~46.7s) — 16 new tests in `tests/test_first_party_skills.py` (11) and `tests/test_e2e_demonstration.py` (5)  
+**Lint:** `ruff check src/ tests/` — 0 errors · `ruff format --check src/ tests/` — clean (148 files)  
+**Type Check:** `mypy src/ tests/` — 0 issues (146 source files)  
+
+#### A. First-Party Skills Architecture (`src/skills/first_party.py`)
+- `workspace.inspect`: Read-only inspection of workspace structure, file hierarchy, pattern search, and evidence-backed summaries. Tool bindings: `file_list`, `file_read`, `file_search`. Capabilities: `filesystem.list`, `filesystem.read`. Strictly read-only; attempts to invoke mutating tools through `BoundSkillToolBroker` fail closed (`SkillToolAccessDeniedError`).
+- `dev.verify`: Controlled development verification executing explicitly whitelisted project test, lint, format, typecheck, and syntax commands via `dev_runner` and safe `python_eval`. Capabilities: `process.run_test`. Strictly prohibits arbitrary or unrestricted shell execution (`shell=True`).
+- `research.diagnose`: Technical research and error diagnosis searching local documentation first, consulting permitted online providers when authorized, preserving source provenance, and formulating testable recovery hypotheses (`HYP-01`, `HYP-02`, etc.) with empirical strategies.
+- `register_first_party_skills()`: Registers all three declarative manifests and deterministic executors with schema and output verification into `SkillRegistry`.
+
+#### B. Tool Broker Safe Primitives (`src/tools/builtin.py`)
+- Extended canonical tool catalog with `file_search` (`FILE_SEARCH_TOOL`), `dev_runner` (`DEV_RUNNER_TOOL`), and `research_query` (`RESEARCH_QUERY_TOOL`).
+- Enhanced `_validate_safe_path()` to deterministically enforce `scope.filesystem_prefixes` sandbox boundaries in addition to `.git` and recovery directory safety.
+
+#### C. End-to-End Demonstration (`tests/test_e2e_demonstration.py`)
+- Complete Autonomous Agent Loop: Verified the entire pipeline from goal submission, briefing assembly, user confirmation, deterministic skill selection, capability authorization via Trust Core, tool execution, observation collection, controlled error introduction, error diagnosis, hypothesis testing, empirical rejection, alternative recovery, independent step verification, checkpoint durability, and experience event recording.
+- Safety Halts: Verified fail-closed safety halts upon permission denial (out-of-scope resource access), material scope changes (briefing cancellation), and budget exhaustion (max tool calls/iterations).
+- Durable Restart Recovery: Verified state restoration and task provenance availability by initializing a fresh `Supervisor` instance against the persisted SQLite database without re-executing completed idempotent steps.
+
+#### D. Golden-Task Evaluation Harness (`src/skills/evaluation.py`)
+- `GoldenTaskRecord` & `GoldenTaskEvaluator`: Reusable evaluation framework executing and documenting 7 realistic operational scenarios with explicit acceptance criteria checklists, actual results, failure modes, and structured verification telemetry:
+  1. `GT-01`: Read-only workspace inspection (directory listing, file count verification, zero mutations).
+  2. `GT-02`: Search and evidence-backed summarization (code pattern matching, line references, synthesized summary).
+  3. `GT-03`: Controlled test execution and diagnosis (syntax/test execution, exit code verification, no unrestricted shell).
+  4. `GT-04`: Recovery from known transient failure (error detection, hypothesis formulation, alternative safe strategy, no duplicate side effects).
+  5. `GT-05`: Researching unfamiliar error (local docs search, source provenance preservation, testable hypotheses).
+  6. `GT-06`: Resuming checkpointed task (SQLite checkpoint persistence across simulated process restart, non-idempotent steps not repeated).
+  7. `GT-07`: Handling ambiguous request via clarification (`ClarificationGate` intercepting ambiguous goal, requesting user clarification, halting unconfirmed execution).
+
 ## [Prompt 030] — 2026-10-10
 
 ### Online Error Research, Source Provenance & Evidence-Based Recovery
