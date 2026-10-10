@@ -695,7 +695,7 @@ class TestStuckLoopAndBudget:
         engine = PersistentExecutionEngine(
             state_store=store, trust_authority=authority, tool_broker=broker
         )
-        with pytest.raises(ConfirmationRequiredError):
+        with pytest.raises(BudgetExhaustedError):
             engine.execute_persistent(task.task_id)
 
 
