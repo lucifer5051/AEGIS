@@ -128,7 +128,7 @@ def read_only_manifest() -> SkillManifest:
 @pytest.fixture
 def admission_controller() -> SkillAdmissionController:
     residency = ModelResidencyManager()
-    concurrency_mgr = SkillConcurrencyManager(residency)
+    concurrency_mgr = SkillConcurrencyManager(residency, system_ram_reserve_bytes=0)
     return SkillAdmissionController(concurrency_mgr)
 
 
@@ -1024,7 +1024,7 @@ def test_19_build_supervisor_with_skills(
     registry = SkillRegistry()
     gate = ClarificationGate()
     residency = ModelResidencyManager()
-    concurrency_mgr = SkillConcurrencyManager(residency)
+    concurrency_mgr = SkillConcurrencyManager(residency, system_ram_reserve_bytes=0)
     controller = SkillAdmissionController(concurrency_mgr)
     exp_svc = ExperienceFeedbackService()
     manifest = SkillManifest(
