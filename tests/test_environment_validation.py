@@ -164,6 +164,7 @@ def test_13_no_unexpected_application_source():
     # In Prompt 020, src/tools/ (Tool Broker) is authorized.
     # In Prompt 021-023, src/manager/, src/reasoning/, src/skills/ are authorized.
     # In Prompt 024, src/memory/ (EKM Memory Runtime) is authorized.
+    # In Prompt 027, src/workflow/ and src/scheduler/ are authorized.
     allowed_subdirs = {
         "config",
         "hardware",
@@ -177,6 +178,8 @@ def test_13_no_unexpected_application_source():
         "reasoning",
         "skills",
         "memory",
+        "workflow",
+        "scheduler",
         "__pycache__",
     }
     for child in src_dir.iterdir():
@@ -187,7 +190,6 @@ def test_13_no_unexpected_application_source():
 
     forbidden_runtime_packages = {
         "trust_core",
-        "scheduler",
         "database",
         "channels",
     }
