@@ -23,6 +23,12 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from src.decision.models import FastDecisionRequest, RequestContext
 from src.decision.service import FastDecisionService
+from src.manager.briefing import (
+    ConfirmationGate,
+    ContextBriefing,
+    ExecutionBudget,
+    ProvenanceType,
+)
 from src.manager.context import ContextAssembler
 from src.manager.errors import (
     StepNotFoundError,
@@ -30,6 +36,7 @@ from src.manager.errors import (
     TaskStateError,
 )
 from src.manager.models import (
+    ExecutionMode,
     StepPlan,
     StepRecord,
     StepState,
@@ -37,7 +44,13 @@ from src.manager.models import (
     TaskState,
 )
 from src.manager.observation import StepObservation
+from src.manager.persistent_engine import PersistentExecutionEngine
 from src.manager.planner import PlanValidationError, StructuredPlanner
+from src.manager.research import (
+    DiagnosticInvestigator,
+    LocalDocResearchProvider,
+    ResearchProvider,
+)
 from src.manager.state_store import StateStore
 from src.manager.synthesis import TaskSynthesizer
 from src.manager.verifier import StepVerifier, VerificationOutcome
@@ -73,27 +86,12 @@ class Supervisor:
         memory_store: Optional[Any] = None,
         retriever: Optional[Any] = None,
         lesson_manager: Optional[Any] = None,
+        confirmation_gate: Optional[ConfirmationGate] = None,
+        persistent_engine: Optional[PersistentExecutionEngine] = None,
+        research_provider: Optional[ResearchProvider] = None,
+        notification_manager: Optional[Any] = None,
     ) -> None:
-        """Initialize supervisor with required subsystems.
-
-        Args:
-            state_store: SQLite-backed durable task and checkpoint store.
-            trust_authority: Deterministic authorization authority.
-            tool_broker: Gateway for tool registration and sandboxed execution.
-            fast_decision: Optional advisory routing engine.
-            reasoning_provider: Optional local reasoning provider for planning and synthesis.
-            planner: Optional structured planner (auto-created if reasoning_provider given).
-            verifier: Optional step verifier (auto-created if not supplied).
-            synthesizer: Optional task synthesizer (auto-created if reasoning_provider given).
-            context_assembler: Optional context assembler.
-            skill_registry: Optional deterministic SkillRegistry.
-            clarification_gate: Optional deterministic ClarificationGate.
-            admission_controller: Optional SkillAdmissionController.
-            experience_service: Optional ExperienceFeedbackService.
-            memory_store: Optional Experience & Knowledge Memory (EKM) store.
-            retriever: Optional selective EKM retriever.
-            lesson_manager: Optional execution lesson manager.
-        """
+        """Initialize supervisor with required subsystems."""
         self._store = state_store
         self._authority = trust_authority
         self._tools = tool_broker
@@ -123,11 +121,42 @@ class Supervisor:
         self._clarification_gate = clarification_gate
         self._admission_controller = admission_controller
         self._experience_service = experience_service
+        self._notifications = notification_manager
+        self._confirmation_gate = confirmation_gate or ConfirmationGate(
+            context_assembler=self._context_assembler,
+            planner=self._planner,
+            tool_broker=self._tools,
+            trust_authority=self._authority,
+            clarification_gate=self._clarification_gate,
+        )
+        self._persistent_engine = persistent_engine or PersistentExecutionEngine(
+            state_store=self._store,
+            trust_authority=self._authority,
+            tool_broker=self._tools,
+            verifier=self._verifier,
+            investigator=DiagnosticInvestigator(
+                research_provider=research_provider or LocalDocResearchProvider(),
+                lesson_manager=self._lesson_manager,
+            ),
+            research_provider=research_provider,
+            notification_manager=notification_manager,
+            experience_service=self._experience_service,
+        )
 
     @property
     def context_assembler(self) -> ContextAssembler:
         """Return the active ContextAssembler."""
         return self._context_assembler
+
+    @property
+    def confirmation_gate(self) -> ConfirmationGate:
+        """Return the active ConfirmationGate."""
+        return self._confirmation_gate
+
+    @property
+    def persistent_engine(self) -> PersistentExecutionEngine:
+        """Return the active PersistentExecutionEngine."""
+        return self._persistent_engine
 
     @property
     def memory_store(self) -> Optional[Any]:
@@ -165,6 +194,7 @@ class Supervisor:
         project_id: Optional[str] = None,
         priority: int = 100,
         metadata: Optional[Dict[str, Any]] = None,
+        execution_mode: Optional[Any] = None,
     ) -> TaskRecord:
         """Submit a user goal into the system, creating a durable task in SUBMITTED state.
 
@@ -195,9 +225,181 @@ class Supervisor:
             priority=priority,
             routing_intent=routing_intent,
             metadata=metadata,
+            execution_mode=execution_mode,
         )
-        logger.info("Goal submitted: task_id=%r, routing_intent=%r", task.task_id, routing_intent)
+        logger.info(
+            "Goal submitted: task_id=%r, routing_intent=%r, mode=%s",
+            task.task_id,
+            routing_intent,
+            task.execution_mode.value,
+        )
         return task
+
+    def create_task(
+        self,
+        goal_text: str,
+        session_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        priority: int = 100,
+        metadata: Optional[Dict[str, Any]] = None,
+        execution_mode: Optional[Any] = None,
+    ) -> TaskRecord:
+        """Alias for submit_goal to create a durable task."""
+        return self.submit_goal(
+            goal_text=goal_text,
+            session_id=session_id,
+            project_id=project_id,
+            priority=priority,
+            metadata=metadata,
+            execution_mode=execution_mode,
+        )
+
+    # ==========================================================================
+    # CONTEXT UNDERSTANDING & CONFIRMATION GATE
+    # ==========================================================================
+
+    def build_context_briefing(
+        self,
+        task_id: str,
+        initial_requirements: Optional[Sequence[str]] = None,
+        initial_constraints: Optional[Sequence[str]] = None,
+        deliverables: Optional[Sequence[str]] = None,
+        proposed_steps: Optional[Sequence[StepPlan]] = None,
+        budgets: Optional[ExecutionBudget] = None,
+    ) -> ContextBriefing:
+        """Construct and persist a Context Understanding Briefing for a task."""
+        task = self._store.get_task(task_id)
+        if not task:
+            raise TaskNotFoundError(f"Task not found: {task_id}")
+
+        briefing = self._confirmation_gate.build_briefing(
+            task=task,
+            user_goal=task.title,
+            project_id=task.project_id,
+            initial_requirements=initial_requirements,
+            initial_constraints=initial_constraints,
+            deliverables=deliverables,
+            proposed_steps=proposed_steps,
+            budgets=budgets,
+        )
+        new_meta = dict(task.metadata)
+        new_meta["context_briefing"] = briefing.model_dump()
+        self._store.update_task_metadata(task_id, new_meta)
+        return briefing
+
+    def confirm_context_briefing(
+        self,
+        task_id: str,
+        confirmation_note: Optional[str] = None,
+    ) -> ContextBriefing:
+        """Explicitly confirm a briefing, unlocking persistent execution."""
+        task = self._store.get_task(task_id)
+        if not task:
+            raise TaskNotFoundError(f"Task not found: {task_id}")
+
+        briefing_data = task.metadata.get("context_briefing")
+        if not briefing_data:
+            raise TaskStateError(f"Task '{task_id}' has no Context Briefing to confirm.")
+
+        briefing = ContextBriefing.model_validate(briefing_data)
+        confirmed_briefing = self._confirmation_gate.confirm(briefing, confirmation_note)
+
+        new_meta = dict(task.metadata)
+        new_meta["context_briefing"] = confirmed_briefing.model_dump()
+        self._store.update_task_metadata(task_id, new_meta)
+
+        # If task was paused in AWAITING_APPROVAL, transition to EXECUTING if steps are ready
+        if task.state == TaskState.AWAITING_APPROVAL:
+            steps = self._store.list_task_steps(task_id)
+            if steps:
+                self._store.transition_task_state(task_id, TaskState.EXECUTING)
+        return confirmed_briefing
+
+    def correct_context_briefing(
+        self,
+        task_id: str,
+        correction_text: str,
+        updated_steps: Optional[Sequence[StepPlan]] = None,
+        updated_deliverables: Optional[Sequence[str]] = None,
+    ) -> ContextBriefing:
+        """Apply user correction to briefing, resetting to AWAITING_CONFIRMATION."""
+        task = self._store.get_task(task_id)
+        if not task:
+            raise TaskNotFoundError(f"Task not found: {task_id}")
+
+        briefing_data = task.metadata.get("context_briefing")
+        if not briefing_data:
+            raise TaskStateError(f"Task '{task_id}' has no Context Briefing to correct.")
+
+        briefing = ContextBriefing.model_validate(briefing_data)
+        corrected_briefing = self._confirmation_gate.correct(
+            briefing,
+            correction_text,
+            updated_steps=updated_steps,
+            updated_deliverables=updated_deliverables,
+        )
+
+        new_meta = dict(task.metadata)
+        new_meta["context_briefing"] = corrected_briefing.model_dump()
+        self._store.update_task_metadata(task_id, new_meta)
+        return corrected_briefing
+
+    def add_context_to_briefing(
+        self,
+        task_id: str,
+        new_context: Sequence[str],
+        provenance: ProvenanceType = ProvenanceType.USER_PROVIDED,
+    ) -> ContextBriefing:
+        """Add context items to briefing and update task metadata."""
+        task = self._store.get_task(task_id)
+        if not task:
+            raise TaskNotFoundError(f"Task not found: {task_id}")
+
+        briefing_data = task.metadata.get("context_briefing")
+        if not briefing_data:
+            raise TaskStateError(f"Task '{task_id}' has no Context Briefing to supplement.")
+
+        briefing = ContextBriefing.model_validate(briefing_data)
+        updated = self._confirmation_gate.add_context(briefing, new_context, provenance)
+
+        new_meta = dict(task.metadata)
+        new_meta["context_briefing"] = updated.model_dump()
+        self._store.update_task_metadata(task_id, new_meta)
+        return updated
+
+    def cancel_context_briefing(
+        self,
+        task_id: str,
+        reason: str,
+    ) -> ContextBriefing:
+        """Cancel a briefing and transition the task to CANCELLED."""
+        task = self._store.get_task(task_id)
+        if not task:
+            raise TaskNotFoundError(f"Task not found: {task_id}")
+
+        briefing_data = task.metadata.get("context_briefing")
+        if not briefing_data:
+            raise TaskStateError(f"Task '{task_id}' has no Context Briefing to cancel.")
+
+        briefing = ContextBriefing.model_validate(briefing_data)
+        cancelled = self._confirmation_gate.cancel(briefing, reason)
+
+        new_meta = dict(task.metadata)
+        new_meta["context_briefing"] = cancelled.model_dump()
+        self._store.update_task_metadata(task_id, new_meta)
+        if not task.state.is_terminal:
+            self._store.transition_task_state(task_id, TaskState.CANCELLED, error_summary=reason)
+        return cancelled
+
+    def get_context_briefing(self, task_id: str) -> Optional[ContextBriefing]:
+        """Fetch the current Context Briefing for a task, if any."""
+        task = self._store.get_task(task_id)
+        if not task:
+            return None
+        briefing_data = task.metadata.get("context_briefing")
+        if not briefing_data:
+            return None
+        return ContextBriefing.model_validate(briefing_data)
 
     def plan_task(
         self,
@@ -270,6 +472,9 @@ class Supervisor:
         task = self._store.get_task(task_id)
         if not task:
             raise TaskNotFoundError(f"Task not found: {task_id}")
+
+        if task.execution_mode == ExecutionMode.PERSISTENT_COMPLETION:
+            return self._persistent_engine.execute_persistent(task_id, actor=actor)
 
         if task.state != TaskState.EXECUTING:
             raise TaskStateError(

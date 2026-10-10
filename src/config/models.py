@@ -440,6 +440,10 @@ class AutonomyConfig(AegisBaseConfig):
         default=True,
         description="Whether user can temporarily elevate tier for a specific task.",
     )
+    default_execution_mode: str = Field(
+        default="STANDARD",
+        description="Default task execution mode ('STANDARD' or 'PERSISTENT_COMPLETION').",
+    )
 
 
 # ==============================================================================

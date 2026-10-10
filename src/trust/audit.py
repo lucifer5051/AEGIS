@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 _SECRET_PATTERNS = [
     # Match both JSON-serialized form ("password":"value") and plain text (password = value).
     # The \"? prefix/suffix handles JSON double-quote wrapping.
-    re.compile(r'(?i)"?password"?\s*[=:]\s*"?\S+'),
+    re.compile(r'(?i)"?password"?\s*(?:[=:]|\s)\s*"?\S+'),
     re.compile(r'(?i)"?api[_-]?key"?\s*[=:]\s*"?\S+'),
     re.compile(r'(?i)"?secret"?\s*[=:]\s*"?\S+'),
     re.compile(r'(?i)"?token"?\s*[=:]\s*"?\S+'),

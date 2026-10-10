@@ -17,12 +17,25 @@ import sqlite3
 from typing import Optional
 
 from src.decision.service import FastDecisionService
+from src.manager.briefing import (
+    BriefingStatus,
+    ConfirmationGate,
+    ContextBriefing,
+    ContextProvenanceItem,
+    ExecutionBudget,
+    ProvenanceType,
+)
 from src.manager.errors import (
+    BudgetExhaustedError,
+    ConfirmationRequiredError,
+    InvalidConfirmationStateError,
     ManagerError,
+    MaterialContextChangeError,
     ReconciliationError,
     SessionNotFoundError,
     StateStoreError,
     StepNotFoundError,
+    StuckLoopDetectedError,
     SupervisorExecutionError,
     TaskNotFoundError,
     TaskStateError,
@@ -31,6 +44,7 @@ from src.manager.models import (
     VALID_STEP_TRANSITIONS,
     VALID_TASK_TRANSITIONS,
     CheckpointSnapshot,
+    ExecutionMode,
     ReconciledTaskResult,
     ReconciliationReport,
     RecoveryDisposition,
@@ -42,7 +56,18 @@ from src.manager.models import (
     TaskRecord,
     TaskState,
 )
+from src.manager.persistent_engine import PersistentExecutionEngine
 from src.manager.reconciliation import ReconciliationEngine
+from src.manager.research import (
+    DiagnosticInvestigator,
+    ErrorClass,
+    ErrorDiagnosis,
+    ErrorSignature,
+    LocalDocResearchProvider,
+    RecoveryStrategyType,
+    ResearchProvider,
+    ResearchRecord,
+)
 from src.manager.state_store import StateStore
 from src.manager.supervisor import GoalExecutionResult, Supervisor
 from src.tools.broker import ToolBroker
@@ -51,6 +76,7 @@ from src.trust.authority import TrustAuthority
 __all__ = [
     # Models & Enums
     "CheckpointSnapshot",
+    "ExecutionMode",
     "GoalExecutionResult",
     "ReconciledTaskResult",
     "ReconciliationReport",
@@ -64,12 +90,35 @@ __all__ = [
     "TaskState",
     "VALID_STEP_TRANSITIONS",
     "VALID_TASK_TRANSITIONS",
+    # Briefing & Confirmation Gate
+    "BriefingStatus",
+    "ConfirmationGate",
+    "ContextBriefing",
+    "ContextProvenanceItem",
+    "ExecutionBudget",
+    "ProvenanceType",
+    # Research & Diagnosis
+    "DiagnosticInvestigator",
+    "ErrorClass",
+    "ErrorDiagnosis",
+    "ErrorSignature",
+    "LocalDocResearchProvider",
+    "RecoveryStrategyType",
+    "ResearchProvider",
+    "ResearchRecord",
+    # Persistent Engine
+    "PersistentExecutionEngine",
     # Errors
+    "BudgetExhaustedError",
+    "ConfirmationRequiredError",
+    "InvalidConfirmationStateError",
     "ManagerError",
+    "MaterialContextChangeError",
     "ReconciliationError",
     "SessionNotFoundError",
     "StateStoreError",
     "StepNotFoundError",
+    "StuckLoopDetectedError",
     "SupervisorExecutionError",
     "TaskNotFoundError",
     "TaskStateError",

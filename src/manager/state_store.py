@@ -192,6 +192,7 @@ class StateStore:
         priority: int = 100,
         routing_intent: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        execution_mode: Optional[Any] = None,
     ) -> TaskRecord:
         """Create a new task in SUBMITTED state.
 
@@ -201,7 +202,12 @@ class StateStore:
         """
         tid = task_id or str(uuid4())
         clean_title = _sanitize_and_validate_text(title) or ""
-        meta = metadata or {}
+        meta = dict(metadata or {})
+        if execution_mode is not None:
+            mode_str = (
+                execution_mode.value if hasattr(execution_mode, "value") else str(execution_mode)
+            )
+            meta["execution_mode"] = mode_str
         meta_json = _sanitize_and_validate_json(meta)
         now = _now_utc()
 
@@ -245,6 +251,44 @@ class StateStore:
             updated_at=now,
             metadata=meta,
         )
+
+    def update_task_metadata(
+        self,
+        task_id: str,
+        metadata: Dict[str, Any],
+    ) -> TaskRecord:
+        """Atomically update metadata JSON for a task.
+
+        Raises:
+            TaskNotFoundError: If task_id does not exist.
+            SecretLeakError: If secret pattern detected in metadata.
+            StateStoreError: On database error.
+        """
+        task = self.get_task(task_id)
+        if not task:
+            raise TaskNotFoundError(f"Task not found: {task_id}")
+
+        meta_json = _sanitize_and_validate_json(metadata)
+        now = _now_utc()
+        try:
+            with transaction(self._conn, immediate=True) as cur:
+                cur.execute(
+                    """
+                    UPDATE tasks
+                    SET metadata_json = ?, updated_at = ?
+                    WHERE task_id = ?;
+                    """,
+                    (meta_json, now, task_id),
+                )
+        except SecretLeakError:
+            raise
+        except Exception as exc:
+            raise StateStoreError(f"Failed to update metadata for task '{task_id}': {exc}") from exc
+
+        updated = self.get_task(task_id)
+        if not updated:
+            raise TaskNotFoundError(f"Task '{task_id}' missing after metadata update.")
+        return updated
 
     def get_task(self, task_id: str) -> Optional[TaskRecord]:
         """Fetch a task record by ID."""
@@ -618,6 +662,46 @@ class StateStore:
         updated = self.get_step(step_id)
         if not updated:
             raise StepNotFoundError(f"Step '{step_id}' missing after state update.")
+        return updated
+
+    def update_step_arguments(
+        self,
+        step_id: str,
+        arguments: Dict[str, Any],
+    ) -> StepRecord:
+        """Atomically update arguments JSON for a step.
+
+        Raises:
+            StepNotFoundError: If step_id does not exist.
+            SecretLeakError: If secret pattern detected in arguments.
+            StateStoreError: On database error.
+        """
+        step = self.get_step(step_id)
+        if not step:
+            raise StepNotFoundError(f"Step not found: {step_id}")
+
+        args_json = _sanitize_and_validate_json(arguments)
+        now = _now_utc()
+        try:
+            with transaction(self._conn, immediate=True) as cur:
+                cur.execute(
+                    """
+                    UPDATE task_steps
+                    SET arguments_json = ?, updated_at = ?
+                    WHERE step_id = ?;
+                    """,
+                    (args_json, now, step_id),
+                )
+        except SecretLeakError:
+            raise
+        except Exception as exc:
+            raise StateStoreError(
+                f"Failed to update arguments for step '{step_id}': {exc}"
+            ) from exc
+
+        updated = self.get_step(step_id)
+        if not updated:
+            raise StepNotFoundError(f"Step '{step_id}' missing after arguments update.")
         return updated
 
     # ==========================================================================

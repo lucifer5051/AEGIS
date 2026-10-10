@@ -3,6 +3,40 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 029] — 2026-10-10
+
+### Context Understanding, Confirmation Gate & Persistent Completion Mode
+
+**Status:** IMPLEMENTED & VERIFIED — Implemented user-selectable `ExecutionMode.PERSISTENT_COMPLETION` with a mandatory pre-execution **Context Understanding & Confirmation Gate** (`ConfirmationGate`, `ContextBriefing`) and autonomous resilient execution engine (`PersistentExecutionEngine`, `DiagnosticInvestigator`, `ErrorClassifier`). Adheres to the principle: *Understand -> Explain -> Confirm -> Execute -> Observe -> Diagnose -> Recover -> Verify -> Complete*. Guarantees that autonomous execution cannot proceed until a structured briefing is explicitly confirmed by the user. Routine recoverable errors are investigated and retried within confirmed bounds; material context changes, policy approval requirements, oscillating strategies, and stuck loops pause execution for user reconfirmation.  
+**Tests:** 575 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~42.2s) — 59 new tests in `tests/test_persistent_completion.py`  
+**Lint:** `ruff check src/ tests/` — 0 errors · `ruff format --check src/ tests/` — clean (143 files)  
+**Type Check:** `mypy src/ tests/` — 0 issues (141 source files)  
+
+#### A. Execution Mode & Configuration (`src/config/models.py`, `src/manager/models.py`, `src/manager/state_store.py`)
+- `ExecutionMode`: Added `STANDARD` (fast-path default, zero overhead) and `PERSISTENT_COMPLETION` (high-assurance persistent recovery).
+- `TaskRecord`: Extended with `execution_mode: ExecutionMode` stored in `tasks` table metadata.
+- `AutonomyConfig`: Added `default_execution_mode: str = "STANDARD"` configuration setting with persistent mode validation.
+
+#### B. Context Understanding & Confirmation Gate (`src/manager/briefing.py`)
+- `ContextBriefing`: Structured, frozen data model documenting goal, deliverables, requirements, constraints, provenance items, relevant memories, approved lessons, available tools, assumptions, uncertainties, proposed step plan, acceptance criteria, risks, required capability approvals, execution budgets, and versioning.
+- `ContextProvenanceItem`: Source-of-truth tracking categorized by `ProvenanceType` (`USER_PROVIDED`, `LOCAL_CODEBASE`, `LOCAL_SYSTEM_CONFIG`, `LOCAL_ENVIRONMENT`, `EKM_MEMORY`, `INFERRED_ASSUMPTION`).
+- `ExecutionBudget`: Bounded constraints on iterations, recovery cycles, tool calls, and execution duration.
+- `ConfirmationGate`: Core engine for assembling briefings via `ContextAssembler`, evaluating deterministic ambiguity via `ClarificationGate`, verifying approval requirements against Trust Core, and enforcing state transitions (`confirm()`, `correct()`, `add_information()`, `cancel()`).
+- Fail-Closed Gate Invariant: Tasks with `PERSISTENT_COMPLETION` mode fail closed (`ConfirmationRequiredError`) if execution is attempted without a `CONFIRMED` briefing.
+
+#### C. Error Classification & Research Loop (`src/manager/research.py`)
+- `ErrorClass`: Categorized taxonomy (`TRANSIENT`, `ENVIRONMENT_RESOURCE`, `CONFIGURATION_PARAM`, `PERMISSION_AUTH`, `LOGIC_STRATEGY`, `TOOL_INTERFACE`, `UNKNOWN`).
+- `ErrorSignature`: Normalized failure fingerprint with zero-secret redaction for loop/oscillation detection.
+- `LocalDocResearchProvider`: 100% offline reference lookup against local specifications and architectural documentation.
+- `DiagnosticInvestigator`: Synthesizes failure hypotheses, consults approved lessons in `LessonManager`, suggests structured parameter/strategy adjustments, and selects recovery strategies (`RETRY_WITH_BACKOFF`, `PARAM_ADJUSTMENT`, `ALTERNATIVE_TOOL`, `ESCALATE_APPROVAL`, `REPLAN`, `ABORT_BLOCKER`).
+- Stuck-Loop & Oscillation Detection: Detects repeating failed strategies or 3 identical error signatures and aborts with blocker status to prevent runaway loops.
+
+#### D. Persistent Execution Engine (`src/manager/persistent_engine.py`)
+- `PersistentExecutionEngine`: Orchestrates resilient persistent loop with step verification (`StepVerifier`), diagnostic investigation, bounded recovery, and durable SQLite checkpoints at every state transition.
+- Material Change Escalation: Halts on Trust Core denials, unknown tools, or scope modifications, transitioning task to `AWAITING_APPROVAL` with user notification.
+- Zero-Secret Redaction: Enforces `_check_no_secrets()` across all briefing notes, error signatures, diagnosis records, and checkpoints.
+- Notification Integration: Emits advisory notifications via `NotificationManager` on workflow completion, required approvals, and budget exhaustion.
+
 ## [Prompt 028] — 2026-10-10
 
 ### Notification Subsystem & Approval Escalation

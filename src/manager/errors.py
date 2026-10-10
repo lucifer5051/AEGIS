@@ -44,3 +44,23 @@ class StateStoreError(ManagerError):
 
 class SupervisorExecutionError(ManagerError):
     """Raised when an unrecoverable execution failure halts the supervisor loop."""
+
+
+class ConfirmationRequiredError(ManagerError):
+    """Raised when persistent execution is attempted without a confirmed context briefing."""
+
+
+class InvalidConfirmationStateError(ManagerError):
+    """Raised when attempting to confirm or alter a briefing in an incompatible state."""
+
+
+class BudgetExhaustedError(SupervisorExecutionError):
+    """Raised when persistent execution exhausts configured iteration or time budgets."""
+
+
+class StuckLoopDetectedError(SupervisorExecutionError):
+    """Raised when oscillating strategies or repeated errors indicate a stuck loop."""
+
+
+class MaterialContextChangeError(ManagerError):
+    """Raised when new evidence materially changes context, requiring reconfirmation."""

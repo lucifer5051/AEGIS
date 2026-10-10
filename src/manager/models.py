@@ -62,6 +62,14 @@ _TERMINAL_TASK_STATES: FrozenSet[TaskState] = frozenset(
 )
 
 
+@unique
+class ExecutionMode(str, Enum):
+    """User-selectable task execution mode."""
+
+    STANDARD = "STANDARD"
+    PERSISTENT_COMPLETION = "PERSISTENT_COMPLETION"
+
+
 VALID_TASK_TRANSITIONS: Dict[TaskState, FrozenSet[TaskState]] = {
     TaskState.SUBMITTED: frozenset({TaskState.PLANNING, TaskState.CANCELLED}),
     TaskState.PLANNING: frozenset(
@@ -75,6 +83,7 @@ VALID_TASK_TRANSITIONS: Dict[TaskState, FrozenSet[TaskState]] = {
     TaskState.AWAITING_APPROVAL: frozenset(
         {
             TaskState.EXECUTING,
+            TaskState.PLANNING,
             TaskState.FAILED,
             TaskState.CANCELLED,
         }
@@ -198,6 +207,15 @@ class TaskRecord(BaseModel):
     completed_at: Optional[str] = None
     error_summary: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        """Return the execution mode configured on this task (default STANDARD)."""
+        raw = self.metadata.get("execution_mode", ExecutionMode.STANDARD.value)
+        try:
+            return ExecutionMode(raw)
+        except ValueError:
+            return ExecutionMode.STANDARD
 
 
 class StepPlan(BaseModel):
