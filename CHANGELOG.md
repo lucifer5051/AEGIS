@@ -3,6 +3,34 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 028] — 2026-10-10
+
+### Notification Subsystem & Approval Escalation
+
+**Status:** IMPLEMENTED & VERIFIED — Implemented durable notification subsystem (`src/notifications/`) backed by SQLite schema migration `0008_notifications_schema.sql`. Informs user about scheduled-task failures, workflow completions/failures, pending approvals, resource constraints, and required manual intervention. Supports typed prioritized events (P0-P4), quiet-hours suppression for non-critical alerts, deduplication suppression keys, bounded delivery retries with FAILED terminal state, delivery failure absorption without store corruption, restart recovery, adapter decoupling, and zero-secret redaction. Strictly enforces the architectural invariant that notifications are advisory-only and never grant approvals, mutate capability tokens, or bypass Trust Core.  
+**Tests:** 516 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~47.4s) — 16 new tests in `tests/test_notifications.py`  
+**Lint:** `ruff check src/ tests/` — 0 errors · `ruff format --check src/ tests/` — clean (139 files)  
+**Type Check:** `mypy src/ tests/` — 0 issues (137 source files)  
+
+#### A. Notification Data Architecture & Persistence (`src/notifications/models.py`, `store.py`)
+- `Notification`, `NotificationAttempt`, `DeliveryResult`: Typed, immutable representations of events, per-attempt audit trails, and delivery outcomes.
+- `NotificationEventType`: Standard event classifications (`APPROVAL_REQUIRED`, `APPROVAL_EXPIRED`, `APPROVAL_GRANTED`, `APPROVAL_REJECTED`, `WORKFLOW_COMPLETED`, `WORKFLOW_FAILED`, `WORKFLOW_PAUSED`, `SCHEDULE_FAILED`, `SCHEDULE_MISSED`, `RESOURCE_CONSTRAINT`, `RECOVERY_EXHAUSTED`, `INTERVENTION_REQUIRED`, `GENERAL_INFO`).
+- `NotificationPriority`: P0 (critical/immediate) down to P4 (background/informational).
+- `NotificationStore`: SQLite ACID persistence with transactional updates, atomic state transitions (`PENDING`, `DELIVERED`, `FAILED`, `ACKNOWLEDGED`, `DISMISSED`, `SUPPRESSED`), and bounded attempt history tracking.
+- Zero-Secret Invariant: Enforced at write time via `_check_no_secrets()`, ensuring credentials, API keys, tokens, and raw passwords never enter notification titles, bodies, or metadata.
+
+#### B. Notification Manager & Delivery Pipeline (`src/notifications/manager.py`, `adapters.py`)
+- `NotificationManager`: Central orchestrator for emitting, deduplicating, prioritizing, suppressing, acknowledging, dismissing, and retrying notifications.
+- Quiet Hours Policy: Suppresses non-critical notifications (P2-P4) during configured user quiet hours; critical notifications (P0-P1) bypass quiet hours unconditionally.
+- Deduplication Suppression: Suppresses duplicate notifications with matching `dedup_key` within the configured dedup window.
+- Decoupled Delivery Adapters: `DeliveryAdapter` protocol with default `LocalLogAdapter`; handles adapter exceptions safely without corrupting store state.
+- Bounded Retries: Tracks attempts per notification, transitioning notifications exceeding `max_delivery_attempts` to terminal `FAILED` status.
+- Advisory-Only Invariant: Explicitly tested and verified that notifications, user acknowledgements, and dismissals never approve pending actions or grant Trust Core capabilities.
+
+#### C. Migration & Test Integration
+- `migrations/0008_notifications_schema.sql`: Staged migration creating `notifications` and `notification_attempts` tables with compound indexes and integrity constraints.
+- Environment & schema validation tests updated in `tests/test_domain_schema.py` and `tests/test_environment_validation.py` to register migration 0008 and package `src/notifications/`.
+
 ## [Prompt 027] — 2026-10-10
 
 ### Durable Workflow Engine & Task Scheduler

@@ -180,6 +180,7 @@ def test_13_no_unexpected_application_source():
         "memory",
         "workflow",
         "scheduler",
+        "notifications",
         "__pycache__",
     }
     for child in src_dir.iterdir():
