@@ -165,7 +165,7 @@ src/storage/paths.py::validate_database_path().
 | **023** | **Skills Pipeline Integration & End-to-End Execution** | `450535e` | **2026-10-09** | **Complete pipeline integration: User Goal -> ClarificationGate -> Supervisor -> SkillRegistry -> SkillAdmissionController -> BoundSkillToolBroker -> ToolBroker -> TrustCore -> Verifier -> Checkpoint/Reconciliation -> ExperienceEvent. Public GoalExecutionResult, ReconciliationEngine alias. 24 new offline integration tests.** | **418 tests pass (100% offline, 0 failures)** |
 | **024** | **EKM Runtime, Selective Retrieval & Context IR** | `b60e4c4` | **2026-10-10** | **EKMMemoryStore, FTS5IndexManager, EKMRetriever (multi-stage), ContextCompiler (bounded token budget). SemanticMemoryBackend protocol. Supervisor/ContextAssembler wired to EKM. 24 new EKM runtime tests.** | **442 tests pass (100% offline, 0 failures)** |
 | **025** | **Durable Experience Memory & Evidence-Gated Lesson Lifecycle** | `d3d538f` | **2026-10-10** | **`src/memory/lessons.py`: ExecutionLesson, LessonManager, LessonProposal, LessonState, LessonRiskLevel. Risk-based promotion thresholds (LOW/MEDIUM/HIGH). EKM fact linkage on APPROVED. Circular import fix in `src/skills/__init__.py`. DB provenance_source constraint fix. 24 new lesson lifecycle tests.** | **466 tests pass (100% offline, 0 failures)** |
-| **026** | **Approved Lesson Retrieval & Context IR Integration** | (local) | **2026-10-10** | **EKMRetriever approved lesson retrieval pipeline (`_retrieve_lessons`), ContextCompiler bounded Context IR integration, token budget tracking (`included_lesson_ids`, `omitted_lesson_ids`), deduplication vs EKM facts (`lesson.fact_id`), Supervisor ContextAssembler integration, non-escalation security boundary verification. 14 new tests.** | **480 tests pass (100% offline, 0 failures)** |
+| **026** | **Approved Lesson Retrieval & Context IR Integration** | `76a467f` | **2026-10-10** | **EKMRetriever approved lesson retrieval pipeline (`_retrieve_lessons`), ContextCompiler bounded Context IR integration, token budget tracking (`included_lesson_ids`, `omitted_lesson_ids`), deduplication vs EKM facts (`lesson.fact_id`), Supervisor ContextAssembler integration, non-escalation security boundary verification. 14 new tests.** | **480 tests pass (100% offline, 0 failures)** |
 
 ---
 
@@ -1375,7 +1375,7 @@ Branch: `main` (9 commits ahead of `origin/main`; do NOT push)
 
 ## 19. Implementation Milestone: Prompt 026 — Approved Lesson Retrieval & Context IR Integration
 
-- **Commit:** (local)
+- **Commit:** `76a467f`
 - **Status:** IMPLEMENTED & VERIFIED (100% offline, 0 network calls, 480 passed tests)
 - **Scope & Delivery:**
   - Integrated approved `ExecutionLesson` records into canonical `EKMRetriever._retrieve_lessons()`.
