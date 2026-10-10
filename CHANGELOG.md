@@ -3,6 +3,32 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 027] — 2026-10-10
+
+### Durable Workflow Engine & Task Scheduler
+
+**Status:** IMPLEMENTED & VERIFIED — Implemented durable workflow engine (`src/workflow/`) and resilient task scheduler (`src/scheduler/`) backed by SQLite schema migration `0007_workflow_scheduler_schema.sql`. Integrates end-to-end with Supervisor, StateStore checkpoints, Tool Broker, and Trust Core authorization. Supports DAG validation, cycle detection, argument interpolation, bounded retries, budget limits, pause/resume/cancellation, one-shot/cron/event schedules, deduplication, and downtime missed-run handling.  
+**Tests:** 500 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~45.2s) — 20 new tests (10 in `tests/test_workflow_engine.py`, 10 in `tests/test_scheduler.py`)  
+**Lint:** `ruff check src/ tests/` — 0 errors · `ruff format --check src/ tests/` — clean (132 files)  
+**Type Check:** `mypy src/ tests/` — 0 issues (130 source files)  
+
+#### A. Durable Workflow Engine (`src/workflow/`)
+- `WorkflowDefinition`, `WorkflowStepDefinition`, `WorkflowBudget`, `WorkflowRun`: Typed, immutable data models representing versioned workflow definitions and durable run instances.
+- `WorkflowValidator`: Structural checks, DAG cycle detection using 3-color DFS graph traversal, dependency validation, input/output reference interpolation checks (`{{inputs.key}}`, `{{steps.step_id.outputs.key}}`), zero-secret detection, and tool registration validation.
+- `WorkflowStore`: SQLite persistence for workflow definitions and runs across application restarts, ensuring ACID state transitions (`PENDING`, `RUNNING`, `PAUSED`, `COMPLETED`, `FAILED`, `CANCELLED`).
+- `WorkflowEngine`: Dependency-aware execution loop resolving step topological eligibility; step argument interpolation; execution budgeting and deadline enforcement; bounded retries and failure policy (`FAIL_FAST`, `CONTINUE_ON_FAILURE`, `RETRY`); task-level checkpoint persistence via `StateStore`; idempotency token tracking to avoid duplicate side effects during recovery.
+- Verification Pipeline Integration: Executes steps through `ToolBroker` and `TrustCore`; enforces `StepVerifier` policies (`deterministic_check`, `requires_approval`, `trusted_output`); pauses workflows safely on approval escalation or authorization revocation.
+
+#### B. Durable Scheduler (`src/scheduler/`)
+- `ScheduleDefinition`, `ScheduleExecutionRecord`: Typed models for one-shot, recurring cron, and event-triggered schedule policies.
+- `compute_next_cron_run()`: Standard 5-part cron evaluator (`minute hour day-of-month month day-of-week`) supporting ranges, steps (`*/15`), lists, and wildcards.
+- `SchedulerStore`: SQLite persistence with uniqueness constraint and atomic deduplication on `(schedule_id, scheduled_for)` to prevent double executions across poll cycles and system restarts.
+- `WorkflowScheduler`: Periodic poller and dispatcher; supports `ONE_SHOT`, `CRON_RECURRING`, and `EVENT_TRIGGERED` actions; handles downtime missed runs according to configured policy (`SKIP`, `RUN_ONCE`, `FAIL_ALERT`); enforces bounded concurrency (`max_concurrent_runs`); supports dynamic pause, resume, and cancellation.
+
+#### C. Migration & Test Environment Compatibility
+- `migrations/0007_workflow_scheduler_schema.sql`: Staged migration adding `workflow_definitions`, `workflow_runs`, `schedules`, and `schedule_executions` tables with foreign keys and compound indexes.
+- Environment & schema validation tests updated in `tests/test_domain_schema.py` and `tests/test_environment_validation.py` to register migration 0007 and runtime packages.
+
 ## [Prompt 026] — 2026-10-10
 
 ### Approved Lesson Retrieval & Context IR Integration
