@@ -1505,8 +1505,37 @@ Branch: `main` (9 commits ahead of `origin/main`; do NOT push)
 
 ---
 
-End of SAGE Project State Document -- Prompt 030  
-Next update required after: Prompt 031
+## 24. Implementation Milestone: Prompt 031 — First-Party Skills & End-to-End SAGE Demonstration
 
+- **Status:** IMPLEMENTED & VERIFIED (617 passed tests, 0 failed, 100% offline, full pipeline verified)
+- **Scope & Delivery:**
+  - Developed three bounded, verifiable first-party skills in `src/skills/first_party.py`:
+    - `workspace.inspect`: Read-only structural inspection, file hierarchy listing, and pattern searching (`filesystem.list`, `filesystem.read` capabilities; fail-closed upon mutation attempts).
+    - `dev.verify`: Controlled project verification executing explicitly allowlisted test, lint, format, and syntax commands (`process.run_test` capability; strictly prohibits unrestricted shell execution).
+    - `research.diagnose`: Technical research and error diagnosis searching local documentation first, escalating to permitted online providers when authorized, preserving provenance, and formulating empirical hypotheses.
+  - Built-in safe tools in `src/tools/builtin.py`:
+    - `file_search` (`FILE_SEARCH_TOOL`), `dev_runner` (`DEV_RUNNER_TOOL`), `research_query` (`RESEARCH_QUERY_TOOL`).
+    - Enforced strict sandbox boundaries (`scope.filesystem_prefixes`, `.git` protection, recovery path isolation).
+  - End-to-End Demonstration (`tests/test_e2e_demonstration.py`):
+    - Validated full lifecycle: User Request -> Briefing -> User Confirmation -> Planning -> Skill Selection -> Trust Core Authorization -> Tool Execution -> Observation -> Verification -> Error Diagnosis -> Research -> Hypothesis Testing -> Alternative Recovery -> Step Verification -> Checkpointing -> Completion -> Experience Recording -> Simulated Restart Recovery.
+    - Verified fail-closed safety halts upon permission denial, material context changes, and budget exhaustion.
+  - Golden-Task evaluation harness (`src/skills/evaluation.py`):
+    - `GoldenTaskEvaluator` executing and documenting 7 realistic scenarios (`GT-01` to `GT-07`) with explicit acceptance criteria checklists and structured telemetry.
+  - Added 16 new unit and integration tests across `tests/test_first_party_skills.py` (11) and `tests/test_e2e_demonstration.py` (5).
+- **Verification Evidence:**
+  - `pytest tests/`: 617 passed in SAGE venv in 44.08s.
+  - `ruff check src/ tests/`: 0 errors.
+  - `ruff format --check src/ tests/`: 148 files clean.
+  - `mypy src/ tests/`: 0 issues found in 146 source files.
+  - `git diff --check`: 0 issues.
+- **Known Limitations:**
+  - Unrestricted shell commands (`shell=True`) prohibited; only allowlisted tooling supported.
+  - Online research restricted to strictly allowlisted developer documentation domains.
+  - Proprietary license pending formal selection.
+- **Next Development Step:**
+  - Public repository publication and diploma evaluation demonstration.
 
+---
 
+End of SAGE Project State Document -- Prompt 031
+Next update required after: Prompt 032
