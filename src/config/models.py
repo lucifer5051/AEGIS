@@ -463,6 +463,12 @@ class NetworkConfig(AegisBaseConfig):
     )
     request_timeout_seconds: int = Field(default=30, ge=5, le=300)
     max_retries: int = Field(default=3, ge=0, le=10)
+    online_research_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether online documentation research is permitted when network egress is allowed."
+        ),
+    )
 
 
 # ==============================================================================

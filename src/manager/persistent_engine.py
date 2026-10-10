@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from src.manager.briefing import BriefingStatus, ContextBriefing, ExecutionBudget
 from src.manager.errors import (
@@ -71,6 +71,8 @@ class PersistentExecutionEngine:
         verifier: Optional[StepVerifier] = None,
         investigator: Optional[DiagnosticInvestigator] = None,
         research_provider: Optional[ResearchProvider] = None,
+        online_provider: Optional[ResearchProvider] = None,
+        network_permitted: bool = False,
         notification_manager: Optional[Any] = None,
         experience_service: Optional[Any] = None,
     ) -> None:
@@ -79,7 +81,10 @@ class PersistentExecutionEngine:
         self._tools = tool_broker
         self._verifier = verifier or StepVerifier()
         self._investigator = investigator or DiagnosticInvestigator(
-            research_provider=research_provider
+            research_provider=research_provider,
+            online_provider=online_provider,
+            experience_service=experience_service,
+            network_permitted=network_permitted,
         )
         self._notifications = notification_manager
         self._experience = experience_service
@@ -131,6 +136,7 @@ class PersistentExecutionEngine:
         consecutive_failures = 0
         recent_signatures: List[str] = []
         strategy_history: List[RecoveryStrategyType] = []
+        disproven_per_step: Dict[str, List[str]] = {}
 
         logger.info(
             "Entering Persistent Execution Loop for task=%r (v%d)",
@@ -286,6 +292,7 @@ class PersistentExecutionEngine:
             consecutive_failures += 1
             recovery_cycle_count += 1
 
+            step_disproven = disproven_per_step.get(pending_step.step_id, [])
             diagnosis: ErrorDiagnosis = self._investigator.diagnose(
                 step_id=pending_step.step_id,
                 step_index=pending_step.step_index,
@@ -294,12 +301,20 @@ class PersistentExecutionEngine:
                 error_summary=error_summary,
                 consecutive_failures=consecutive_failures,
                 previous_strategies=strategy_history,
+                disproven_hypotheses=step_disproven,
             )
+
+            # Record hypothesis into disproven set for this step in case subsequent retry fails
+            if diagnosis.testable_hypothesis:
+                if pending_step.step_id not in disproven_per_step:
+                    disproven_per_step[pending_step.step_id] = []
+                if diagnosis.testable_hypothesis not in disproven_per_step[pending_step.step_id]:
+                    disproven_per_step[pending_step.step_id].append(diagnosis.testable_hypothesis)
 
             strategy_history.append(diagnosis.chosen_strategy)
             recent_signatures.append(diagnosis.error_signature)
 
-            # Persist checkpoint recording the error and diagnosis
+            # Persist checkpoint recording the error, diagnosis, and research provenance
             self._store.create_checkpoint(
                 task_id=task_id,
                 step_id=pending_step.step_id,
@@ -308,6 +323,13 @@ class PersistentExecutionEngine:
                     "event": "ERROR_DIAGNOSIS",
                     "error_summary": error_summary,
                     "diagnosis": diagnosis.model_dump(),
+                    "testable_hypothesis": diagnosis.testable_hypothesis,
+                    "verification_method": diagnosis.verification_method,
+                    "research_provider": (
+                        diagnosis.research_record.provider_type
+                        if diagnosis.research_record
+                        else None
+                    ),
                     "consecutive_failures": consecutive_failures,
                     "recovery_cycles": recovery_cycle_count,
                 },

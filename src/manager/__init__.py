@@ -59,14 +59,18 @@ from src.manager.models import (
 from src.manager.persistent_engine import PersistentExecutionEngine
 from src.manager.reconciliation import ReconciliationEngine
 from src.manager.research import (
+    CompositeResearchProvider,
     DiagnosticInvestigator,
     ErrorClass,
     ErrorDiagnosis,
     ErrorSignature,
     LocalDocResearchProvider,
+    OnlineDocResearchProvider,
+    OnlineResearchBudget,
     RecoveryStrategyType,
     ResearchProvider,
     ResearchRecord,
+    ResearchSource,
 )
 from src.manager.state_store import StateStore
 from src.manager.supervisor import GoalExecutionResult, Supervisor
@@ -98,14 +102,18 @@ __all__ = [
     "ExecutionBudget",
     "ProvenanceType",
     # Research & Diagnosis
+    "CompositeResearchProvider",
     "DiagnosticInvestigator",
     "ErrorClass",
     "ErrorDiagnosis",
     "ErrorSignature",
     "LocalDocResearchProvider",
+    "OnlineDocResearchProvider",
+    "OnlineResearchBudget",
     "RecoveryStrategyType",
     "ResearchProvider",
     "ResearchRecord",
+    "ResearchSource",
     # Persistent Engine
     "PersistentExecutionEngine",
     # Errors

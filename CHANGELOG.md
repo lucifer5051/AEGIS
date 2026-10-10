@@ -3,6 +3,35 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 030] — 2026-10-10
+
+### Online Error Research, Source Provenance & Evidence-Based Recovery
+
+**Status:** IMPLEMENTED & VERIFIED — Extended Persistent Completion Mode with authorized, bounded, zero-secret online error research (`OnlineDocResearchProvider`, `CompositeResearchProvider`, `OnlineResearchBudget`, `ResearchSource`). Enforces strict research escalation order: 1) inspect error logs/checkpoints, 2) search local documentation and approved lessons, 3) bounded online research against permitted technical domains, 4) safe non-blocking fallback to offline reasoning or human intervention. Enforces strict domain allowlists, prompt injection neutralization, secret scrubbing, and untrusted adjustment validation. Formulates testable hypotheses with empirical verification methods, tracks disproven hypotheses to avoid oscillating strategies, and maintains Trust Core security invariants unconditionally.  
+**Tests:** 601 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~42.0s) — 26 new tests in `tests/test_online_research.py`  
+**Lint:** `ruff check src/ tests/` — 0 errors · `ruff format --check src/ tests/` — clean (144 files)  
+**Type Check:** `mypy src/ tests/` — 0 issues (142 source files)  
+
+#### A. Research Escalation & Provider Hierarchy (`src/manager/research.py`)
+- `ResearchProvider`: Pluggable abstract interface for technical reference documentation lookups.
+- `LocalDocResearchProvider`: Offline knowledge lookup against local architecture specifications.
+- `OnlineDocResearchProvider`: Network-gated, domain-bounded, budgeted lookup against authoritative technical developer resources.
+- `CompositeResearchProvider`: Tiered provider coordinating local-first lookup with escalation to online research when local knowledge is absent and network egress is authorized.
+- Safe Fallback: When network is disabled or backend fails/times out, returns `None` without raising or stalling, falling back smoothly to offline reasoning or user guidance.
+
+#### B. Security Boundaries & Zero-Secret Invariant (`src/manager/research.py`, `src/config/models.py`)
+- Domain Allowlists: Hardcoded and configurable domain restrictions (`docs.python.org`, `pypi.org`, `github.com`, `readthedocs.io`, `stackoverflow.com`, `learn.microsoft.com`, `sqlite.org`, `pydantic.dev`, `pytest.org`).
+- Secret Leak Protection: Rejects queries containing API keys, private keys, authorization tokens, or secrets (`SecretLeakError`); redacts private Windows/Unix paths.
+- Prompt Injection Neutralization: Strips HTML/script tags and neutralizes adversarial prompt injection phrases (`Ignore previous instructions`, `system prompt`, `execute command`, etc.) in external snippets.
+- Untrusted Adjustments Validation: Sanitizes suggested parameter adjustments to allowed types (`int`, `float`, `bool`, safe strings); strictly rejects shell syntax, `__import__`, `eval()`, or code execution payloads.
+- Trust Core Primacy: Research suggestions are treated as untrusted hints. Never bypasses autonomy tiers, never overrides authorization denials, and never executes high-risk operations without approval.
+
+#### C. Provenance Tracking & Hypothesis Testing (`src/manager/research.py`, `src/manager/persistent_engine.py`)
+- `ResearchRecord` & `ResearchSource`: Full citation provenance recording title, URL, retrieval timestamp, domain, official flag, excerpt, query, findings, testable hypothesis, and verification method.
+- `ErrorDiagnosis`: Extended with `testable_hypothesis`, `verification_method`, and `disproven_hypotheses`.
+- Empirical Hypothesis Testing: Tracks failing hypotheses per step; if a hypothesis is disproven, escalates from `PARAM_ADJUSTMENT` to `ALTERNATIVE_TOOL` with user confirmation, and if multiple hypotheses fail, escalates to `REPLAN`.
+- Checkpoint Provenance: Persistent checkpoints record `ERROR_DIAGNOSIS` events with `research_provider`, `testable_hypothesis`, and `verification_method`.
+
 ## [Prompt 029] — 2026-10-10
 
 ### Context Understanding, Confirmation Gate & Persistent Completion Mode
