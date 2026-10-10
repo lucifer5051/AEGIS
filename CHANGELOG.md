@@ -3,6 +3,36 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 025] — 2026-10-10
+
+### Durable Experience Memory & Evidence-Gated Lesson Lifecycle
+
+**Status:** IMPLEMENTED & VERIFIED — Complete evidence-gated lesson lifecycle (`src/memory/lessons.py`): `ExecutionLesson`, `LessonManager`, `LessonProposal`. Fixed circular import between `src/skills/__init__.py` and `src/memory/lessons`. Fixed invalid `provenance_source="experience"` (DB CHECK violation) to `"system"`.  
+**Tests:** 466 passed · 0 failed · 0 skipped (100% offline inside SAGE venv) — 24 new lesson lifecycle tests (`tests/test_lesson_manager.py`)  
+
+#### A. Evidence-Gated Lesson Proposal & Lifecycle
+- `LessonManager.propose_candidate()`: Creates `CANDIDATE` lesson from `ExperienceEvent` + `LessonProposal`. Enforces zero-secret invariant on all text fields. A single execution NEVER directly creates an APPROVED lesson.
+- `LessonManager.corroborate_lesson()`: Accumulates supporting or contradicting execution telemetry. Applies risk-based promotion thresholds: LOW(2), MEDIUM(3), HIGH(4 or explicit user confirmation).
+- Lifecycle states: `CANDIDATE → VERIFIED → APPROVED`, `REJECTED`, `INVALIDATED`, `SUPERSEDED`.
+- `invalidate_lesson()` and `supersede_lesson()` cascade to EKM canonical fact invalidation (non-blocking).
+
+#### B. EKM Integration on Promotion
+- On promotion to `APPROVED`, `LessonManager` calls `EKMMemoryStore.add_fact()` creating a canonical `memory_facts` record tagged with `operational_lesson`.
+- `fact_id` is populated on the lesson record only after confirmed APPROVED promotion.
+- EKM store errors during promotion are non-blocking; lesson still transitions to APPROVED.
+- `provenance_source` corrected to `"system"` (satisfies DB CHECK constraint).
+
+#### C. Persistence & Scoped Retrieval
+- SQLite-backed `execution_lessons` table with indexes on `skill_id`, `project_id`, `state`.
+- Dual-path storage: in-memory dict + SQLite `INSERT OR REPLACE` upserts.
+- `get_lesson()` returns `None` (never raises) for unknown IDs.
+- `list_lessons()` supports filtering by `project_id`, `skill_id`, `states`, and `include_global` for global-scope fallback.
+- In-memory mode (no SQLite) fully functional for offline/testing contexts.
+
+#### D. Bug Fixes
+- **Circular Import**: Removed `src.memory.lessons` imports from `src/skills/__init__.py`. Lesson types now accessed from `src.memory` directly, breaking `skills → memory → skills` cycle.
+- **DB Constraint**: Fixed `provenance_source="experience"` → `"system"` in `LessonManager.corroborate_lesson()`.
+
 ## [Prompt 024] — 2026-10-10
 
 ### Experience & Knowledge Memory (EKM) Runtime, Selective Retrieval & Context IR

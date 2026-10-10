@@ -112,6 +112,7 @@ __all__ = [
     "ExperienceOutcomeType",
     "UserFeedbackType",
     "ExperienceFeedbackService",
+    # NOTE: Lesson types (ExecutionLesson, LessonManager, etc.) live in src.memory.
     # Checkpoints
     "SkillCheckpointMetadata",
     "persist_skill_checkpoint",
