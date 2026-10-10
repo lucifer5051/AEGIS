@@ -172,7 +172,7 @@ aeigs/
 
 All subsystems are backed by deterministic, offline test suites verified prior to every milestone:
 
-- **220 tests passed** (0 failures, 0 skipped, 100% offline) — as of Prompt 014B (2026-09-23).
+- **617 tests passed** (0 failures, 0 skipped, 100% offline) — as of Prompt 031 (2026-10-10).
 - `ruff check`: All checks passed (0 lint errors).
 - `ruff format --check`: All files formatted to standard.
 - `mypy`: 0 issues found across all source and test modules.
@@ -185,7 +185,7 @@ All subsystems are backed by deterministic, offline test suites verified prior t
 ## Roadmap
 
 - **Phase 1 — Foundation Architecture**: Base specifications, development environment, schema design, configuration subsystem, hardware detection. *(Complete)*
-- **Phase 2 — Core Runtime Infrastructure**: Fast Decision Engine, domain schema, SQLite WAL storage, hardware benchmarking, model resource policy & skill concurrency engine. *(Substantially complete — 220 tests; local model runtime installation & qualification PENDING)*
+- **Phase 2 — Core Runtime Infrastructure**: Fast Decision Engine, domain schema, SQLite WAL storage, hardware benchmarking, model resource policy & skill concurrency engine. *(Complete — 617 tests; first-party skills, E2E demonstration, and golden-task evaluator implemented)*
 - **Phase 3 — Hardware Qualification & Model Provisioning**: Model runtime installation, local model artifact download, live inference benchmarking, empirical qualification of RAM/VRAM residency and per-inference deltas, update of concurrency limits from measured data. *(PENDING — awaiting explicit approval)*
 - **Phase 4 — Trust Core**: Cryptographic vault, deterministic authorization engine, capability gating, policy evaluator.
 - **Phase 5 — Manager / Supervisor**: Planning loop, task execution state machine, failure recovery, plan evaluation.
