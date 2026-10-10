@@ -72,6 +72,7 @@ class Supervisor:
         experience_service: Optional[Any] = None,
         memory_store: Optional[Any] = None,
         retriever: Optional[Any] = None,
+        lesson_manager: Optional[Any] = None,
     ) -> None:
         """Initialize supervisor with required subsystems.
 
@@ -91,6 +92,7 @@ class Supervisor:
             experience_service: Optional ExperienceFeedbackService.
             memory_store: Optional Experience & Knowledge Memory (EKM) store.
             retriever: Optional selective EKM retriever.
+            lesson_manager: Optional execution lesson manager.
         """
         self._store = state_store
         self._authority = trust_authority
@@ -106,12 +108,14 @@ class Supervisor:
         )
         self._memory_store = memory_store
         self._retriever = retriever
+        self._lesson_manager = lesson_manager
         if context_assembler is not None:
             self._context_assembler = context_assembler
-        elif memory_store is not None or retriever is not None:
+        elif memory_store is not None or retriever is not None or lesson_manager is not None:
             self._context_assembler = ContextAssembler(
                 memory_store=memory_store,
                 retriever=retriever,
+                lesson_manager=lesson_manager,
             )
         else:
             self._context_assembler = ContextAssembler()
@@ -129,6 +133,11 @@ class Supervisor:
     def memory_store(self) -> Optional[Any]:
         """Return the active EKM memory store, if configured."""
         return self._memory_store
+
+    @property
+    def lesson_manager(self) -> Optional[Any]:
+        """Return the active LessonManager, if configured."""
+        return self._lesson_manager
 
     def assemble_context(
         self,

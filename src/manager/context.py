@@ -18,6 +18,30 @@ from typing import Any, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class ExecutionLessonContext(BaseModel):
+    """Structured representation of an approved execution lesson in Context IR."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    lesson_id: str = Field(description="Unique lesson UUID.")
+    title: str = Field(description="Lesson title.")
+    trigger_condition: str = Field(description="Condition under which lesson applies.")
+    recommended_action: str = Field(description="Recommended procedure or avoidance rule.")
+    observation: str = Field(description="Directly observed outcome.")
+    inferred_explanation: str = Field(
+        description="Inferred hypothesis explaining why outcome occurred."
+    )
+    risk_level: str = Field(description="Risk classification tier (LOW, MEDIUM, HIGH).")
+    lifecycle_state: str = Field(description="Approved lifecycle state.")
+    supporting_evidence_ids: List[str] = Field(default_factory=list)
+    supporting_event_ids: List[str] = Field(default_factory=list)
+    project_id: Optional[str] = Field(default=None)
+    skill_id: Optional[str] = Field(default=None)
+    trust_level: str = Field(default="M1")
+    confidence: float = Field(default=1.0)
+    confirmation_count: int = Field(default=1)
+
+
 class ContextIR(BaseModel):
     """Context Intermediate Representation for planning and reasoning."""
 
@@ -35,6 +59,10 @@ class ContextIR(BaseModel):
     )
     relevant_facts: List[str] = Field(
         default_factory=list, description="Epistemic facts relevant to the goal."
+    )
+    relevant_lessons: List[ExecutionLessonContext] = Field(
+        default_factory=list,
+        description="Approved operational execution lessons informing reasoning.",
     )
     recent_events: List[str] = Field(
         default_factory=list, description="Recent execution milestones or events."
@@ -59,6 +87,14 @@ class ContextIR(BaseModel):
             lines.append("KNOWN FACTS:")
             for f in self.relevant_facts[:5]:
                 lines.append(f" - {f}")
+        if self.relevant_lessons:
+            lines.append("OPERATIONAL LESSONS (ADVISORY ONLY):")
+            for les in self.relevant_lessons[:5]:
+                lines.append(f" - [{les.lesson_id[:8]}] {les.title} (Risk: {les.risk_level})")
+                lines.append(f"   Trigger: {les.trigger_condition}")
+                lines.append(f"   Action: {les.recommended_action}")
+                lines.append(f"   Observed: {les.observation}")
+                lines.append(f"   Explanation: {les.inferred_explanation}")
         if self.recent_events:
             lines.append("RECENT EVENTS:")
             for e in self.recent_events[:5]:
@@ -79,21 +115,23 @@ class ContextAssembler:
         memory_store: Optional[Any] = None,
         retriever: Optional[Any] = None,
         compiler: Optional[Any] = None,
+        lesson_manager: Optional[Any] = None,
     ) -> None:
         self._conn = conn
         self._store = memory_store
         self._retriever = retriever
+        self._lesson_manager = lesson_manager
         if self._retriever is None and self._store is not None:
             from src.memory.retriever import EKMRetriever
 
-            self._retriever = EKMRetriever(self._store)
+            self._retriever = EKMRetriever(self._store, lesson_manager=self._lesson_manager)
         elif self._retriever is None and self._conn is not None:
             try:
                 from src.memory.retriever import EKMRetriever
                 from src.memory.store import EKMMemoryStore
 
                 self._store = EKMMemoryStore(self._conn)
-                self._retriever = EKMRetriever(self._store)
+                self._retriever = EKMRetriever(self._store, lesson_manager=self._lesson_manager)
             except Exception:
                 pass
 
@@ -140,6 +178,7 @@ class ContextAssembler:
         # 2. Fallback to basic connection-level queries or safe defaults
         preferences: List[str] = []
         facts: List[str] = []
+        lessons: List[ExecutionLessonContext] = []
         events: List[str] = []
         constraints = [
             "Operate 100% offline; zero network calls allowed.",
@@ -170,12 +209,39 @@ class ContextAssembler:
             except Exception:
                 pass
 
+            try:
+                cursor = self._conn.execute(
+                    "SELECT lesson_id, title, trigger_condition, recommended_action, "
+                    "observation, inferred_explanation, risk_level, project_id, skill_id "
+                    "FROM execution_lessons WHERE state = 'APPROVED' AND is_superseded = 0 "
+                    "AND (project_id = ? OR project_id IS NULL) LIMIT 5;",
+                    (project_id,),
+                )
+                for r in cursor.fetchall():
+                    lessons.append(
+                        ExecutionLessonContext(
+                            lesson_id=r[0],
+                            title=r[1],
+                            trigger_condition=r[2],
+                            recommended_action=r[3],
+                            observation=r[4],
+                            inferred_explanation=r[5],
+                            risk_level=r[6],
+                            lifecycle_state="APPROVED",
+                            project_id=r[7],
+                            skill_id=r[8],
+                        )
+                    )
+            except Exception:
+                pass
+
         return ContextIR(
             active_goal=goal,
             project_id=project_id,
             task_id=task_id,
             relevant_preferences=preferences,
             relevant_facts=facts,
+            relevant_lessons=lessons,
             recent_events=events,
             constraints=constraints,
         )

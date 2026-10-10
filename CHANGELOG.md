@@ -3,6 +3,33 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 026] — 2026-10-10
+
+### Approved Lesson Retrieval & Context IR Integration
+
+**Status:** IMPLEMENTED & VERIFIED — Integrated approved `ExecutionLesson` records into the canonical EKM retrieval pipeline (`src/memory/retriever.py`), bounded Context IR compilation (`src/memory/compiler.py`), and the unified Manager context layer (`src/manager/context.py`, `src/manager/supervisor.py`). Verified 14 comprehensive requirements covering state filtering, scope isolation, deduplication, ranking, budget enforcement, and security non-escalation.  
+**Tests:** 480 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~39.7s) — 14 new retrieval and Context IR integration tests (`tests/test_lesson_retrieval_context.py`)  
+**Lint:** `ruff check src/ tests/` — 0 errors · `ruff format --check src/ tests/` — clean (118 files)  
+**Type Check:** `mypy src/ tests/` — 0 issues (116 source files)  
+
+#### A. Approved-Only Lesson Retrieval Pipeline
+- `EKMRetriever._retrieve_lessons()`: Restricts lesson retrieval strictly to `LessonState.APPROVED`. Excludes every non-active state (`CANDIDATE`, `VERIFIED`, `REJECTED`, `INVALIDATED`, `SUPERSEDED`).
+- Scope boundary isolation: Unscoped queries (`project_id=None`) only retrieve global lessons; scoped queries retrieve matching project lessons plus global lessons when `include_global=True`. Zero cross-project leakage.
+- Skill relevance filtering: When `query.skill_id` is supplied, non-matching lessons are filtered out.
+- Deterministic multi-factor ranking: Scores candidate lessons based on task query keyword matching against trigger condition, recommended action, observation, and title (0.0 to 0.40), scope specificity (0.15), evidence corroboration quality (0.0 to 0.25), and recency bonus (0.0 to 0.20).
+- Evidence & provenance preservation: Supporting event and evidence IDs are preserved on the lesson record and mapped to `provenance_map` in `RetrievalResult`.
+
+#### B. Context IR Compilation & Deduplication
+- `ContextCompiler`: Represents lessons distinctly within `ContextIR` and prompt strings under `## Relevant Verified Lessons (Advisory Experience)`.
+- Explicit separation: Clearly demarcates `Observed:` (factual empirical results) from `Explanation:` (inferred theories).
+- Deduplication against canonical facts: When an approved lesson was promoted to an EKM fact (`lesson.fact_id`), the duplicate memory fact is suppressed to conserve token budget.
+- Strict token budget enforcement: Enforces `available_token_budget` limit, tracking included lessons in `included_lesson_ids` and recording omitted lessons in `omitted_lesson_ids`.
+- `ExecutionLessonContext`: Immutable context DTO containing lesson ID, title, trigger condition, recommended action, observation, explanation, risk level, state, evidence IDs, and scope.
+
+#### C. Supervisor Wiring & Security Invariants
+- `Supervisor` & `ContextAssembler`: Injects `LessonManager` into context assembly pipeline, surfacing approved lessons in `ContextIR.relevant_lessons` with zero additional LLM or model overhead during retrieval.
+- Deterministic Security Boundary: Lessons remain strictly advisory context. Verified via test that lesson records cannot grant tool permissions, bypass Tool Broker policies, alter Trust Core autonomy tiers, or trigger automatic action execution.
+
 ## [Prompt 025] — 2026-10-10
 
 ### Durable Experience Memory & Evidence-Gated Lesson Lifecycle

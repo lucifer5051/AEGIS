@@ -17,9 +17,12 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+from src.memory.lessons import LessonManager
 from src.memory.models import (
+    ExecutionLesson,
+    LessonState,
     MemoryCategory,
     MemoryQuery,
     MemoryRecord,
@@ -54,9 +57,16 @@ def _utc_now_iso() -> str:
 class EKMRetriever:
     """Multi-stage selective retrieval engine for Experience & Knowledge Memory."""
 
-    def __init__(self, store: EKMMemoryStore) -> None:
+    def __init__(
+        self,
+        store: EKMMemoryStore,
+        lesson_manager: Optional[LessonManager] = None,
+    ) -> None:
         self._store = store
         self._conn = store._conn
+        self._lesson_manager = (
+            lesson_manager if lesson_manager is not None else LessonManager(self._conn, store)
+        )
 
     def retrieve(self, query: MemoryQuery) -> RetrievalResult:
         """Execute multi-stage selective retrieval based on query constraints."""
@@ -242,7 +252,15 @@ class EKMRetriever:
         final_records = deduped_records[: query.limit]
 
         # ---------------------------------------------------------------------
-        # 7. Construct Provenance Map & Result
+        # 7. Operational Lesson Retrieval (Strictly Approved, Scoped, Ranked)
+        # ---------------------------------------------------------------------
+        selected_lessons: List[ExecutionLesson] = []
+        lesson_scores: Dict[str, float] = {}
+        if query.categories is None or MemoryCategory.LESSON in query.categories:
+            selected_lessons, lesson_scores = self._retrieve_lessons(query)
+
+        # ---------------------------------------------------------------------
+        # 8. Construct Provenance Map & Result
         # ---------------------------------------------------------------------
         provenance_map: Dict[str, Dict[str, Any]] = {}
         for rec in final_records:
@@ -255,18 +273,161 @@ class EKMRetriever:
                 "project_id": rec.project_id,
             }
 
+        for les in selected_lessons:
+            provenance_map[les.lesson_id] = {
+                "type": "lesson",
+                "trust_level": les.trust_level.value,
+                "provenance_source": "system",
+                "risk_level": les.risk_level.value,
+                "state": les.state.value,
+                "supporting_evidence_ids": list(les.supporting_evidence_ids),
+                "supporting_event_ids": list(les.supporting_event_ids),
+                "confirmation_count": les.confirmation_count,
+                "contradiction_count": les.contradiction_count,
+                "fact_id": les.fact_id,
+                "project_id": les.project_id,
+                "skill_id": les.skill_id,
+            }
+
+        combined_ranking = {r.memory_id: ranking_scores[r.memory_id] for r in final_records}
+        for les_id, score in lesson_scores.items():
+            combined_ranking[les_id] = score
+
         return RetrievalResult(
             records=final_records,
             query=query,
-            ranking_scores={r.memory_id: ranking_scores[r.memory_id] for r in final_records},
+            ranking_scores=combined_ranking,
             provenance_map=provenance_map,
             unresolved_conflicts=conflicts,
             metadata={
                 "total_candidates_examined": len(filtered_records),
                 "total_returned": len(final_records),
+                "total_lessons_returned": len(selected_lessons),
                 "as_of_time": as_of,
             },
+            lessons=selected_lessons,
         )
+
+    # =========================================================================
+    # LESSON RETRIEVAL
+    # =========================================================================
+
+    def _retrieve_lessons(
+        self, query: MemoryQuery
+    ) -> Tuple[List[ExecutionLesson], Dict[str, float]]:
+        """Retrieve and rank approved operational lessons matching task scope and relevance."""
+        # 1. Fetch lessons from lesson manager filtering by state APPROVED
+        raw_lessons = self._lesson_manager.list_lessons(
+            project_id=query.project_id,
+            skill_id=query.skill_id,
+            states=[LessonState.APPROVED],
+            include_global=query.include_global,
+            limit=max(50, query.limit * 3),
+        )
+
+        now_iso = _utc_now_iso()
+        as_of = query.as_of_time or now_iso
+
+        filtered_lessons: List[ExecutionLesson] = []
+        for les in raw_lessons:
+            # Strictly APPROVED state
+            if les.state != LessonState.APPROVED:
+                continue
+
+            # Superseded exclusion
+            if not query.include_superseded and les.is_superseded:
+                continue
+
+            # Strict project isolation to prevent cross-project leakage
+            if query.project_id is not None:
+                if not query.include_global and les.project_id != query.project_id:
+                    continue
+                if query.include_global and (
+                    les.project_id is not None and les.project_id != query.project_id
+                ):
+                    continue
+            else:
+                # When no project is queried, only global lessons (project_id IS NULL) are allowed
+                if les.project_id is not None:
+                    continue
+
+            # Skill isolation
+            if query.skill_id is not None and les.skill_id is not None:
+                if les.skill_id != query.skill_id:
+                    continue
+
+            # Minimum trust level
+            if query.min_trust_level is not None:
+                if TRUST_RANKS[les.trust_level] < TRUST_RANKS[query.min_trust_level]:
+                    continue
+
+            # Temporal validity
+            if query.as_of_time is not None:
+                if les.created_at > as_of:
+                    continue
+
+            filtered_lessons.append(les)
+
+        if not filtered_lessons:
+            return [], {}
+
+        # 2. Relevance scoring and ranking
+        query_words: Set[str] = set()
+        if query.query_text and query.query_text.strip():
+            query_words = {w.lower() for w in query.query_text.split() if len(w) > 2}
+
+        scored_lessons: List[Tuple[float, ExecutionLesson]] = []
+        scores_by_id: Dict[str, float] = {}
+
+        for les in filtered_lessons:
+            les_text = (
+                f"{les.title} {les.trigger_condition} {les.recommended_action} {les.observation}"
+            ).lower()
+            les_tokens = set(les_text.split())
+
+            if query_words:
+                overlap = len(query_words.intersection(les_tokens))
+                trigger_overlap = len(
+                    query_words.intersection(set(les.trigger_condition.lower().split()))
+                )
+                text_relevance = min(
+                    1.0, (overlap + trigger_overlap * 2) / max(1, len(query_words))
+                )
+
+                # If query_text is specified but zero text match and not matching explicit skill_id
+                if text_relevance == 0.0 and (
+                    query.skill_id is None or les.skill_id != query.skill_id
+                ):
+                    continue
+            else:
+                text_relevance = 0.5
+
+            # Scope specificity bonus: project-scoped lesson earns a bonus within that project
+            scope_bonus = 0.15 if (query.project_id and les.project_id == query.project_id) else 0.0
+
+            # Evidence quality: confirmation ratio, count factor, and trust weight
+            total_evals = les.confirmation_count + les.contradiction_count
+            conf_ratio = les.confirmation_count / max(1, total_evals)
+            count_factor = min(1.0, les.confirmation_count / 5.0)
+            trust_wt = TRUST_WEIGHTS.get(les.trust_level, 0.5)
+            evidence_score = (conf_ratio * 0.6 + count_factor * 0.4) * trust_wt
+
+            # Applicable recency baseline
+            recency_score = 0.5
+
+            composite = round(
+                (text_relevance * 0.45 + evidence_score * 0.35 + recency_score * 0.20)
+                + scope_bonus,
+                4,
+            )
+            scored_lessons.append((composite, les))
+            scores_by_id[les.lesson_id] = composite
+
+        # Sort descending by composite score, with stable tie-breaker on lesson_id
+        scored_lessons.sort(key=lambda pair: (pair[0], pair[1].lesson_id), reverse=True)
+
+        selected = [les for _, les in scored_lessons[: query.limit]]
+        return selected, {les.lesson_id: scores_by_id[les.lesson_id] for les in selected}
 
     # =========================================================================
     # INTERNAL HELPERS

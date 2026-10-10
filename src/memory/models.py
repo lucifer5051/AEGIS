@@ -14,7 +14,7 @@ Invariants:
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import Enum, unique
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -187,6 +187,97 @@ class EvidenceCreate(BaseModel):
     trust_score: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+@unique
+class LessonState(str, Enum):
+    """Lifecycle states of an operational execution lesson."""
+
+    CANDIDATE = "CANDIDATE"
+    VERIFIED = "VERIFIED"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    SUPERSEDED = "SUPERSEDED"
+    INVALIDATED = "INVALIDATED"
+
+
+@unique
+class LessonRiskLevel(str, Enum):
+    """Sensitivity tier determining evidence thresholds required for promotion."""
+
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class ExecutionLesson(BaseModel):
+    """Typed, evidence-linked execution lesson."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    lesson_id: str = Field(description="Unique lesson UUID.")
+    title: str = Field(min_length=1, max_length=256, description="Short descriptive title.")
+    trigger_condition: str = Field(
+        min_length=1, description="Condition or task pattern where lesson applies."
+    )
+    recommended_action: str = Field(
+        min_length=1, description="Recommended procedure or avoidance rule."
+    )
+    observation: str = Field(
+        min_length=1, description="Directly observed outcome or telemetry fact."
+    )
+    inferred_explanation: str = Field(
+        min_length=1, description="Inferred hypothesis explaining why the observation occurred."
+    )
+    skill_id: Optional[str] = Field(default=None, description="Associated skill ID, if applicable.")
+    project_id: Optional[str] = Field(default=None, description="Project scope ID, if scoped.")
+    state: LessonState = Field(
+        default=LessonState.CANDIDATE, description="Current lifecycle state."
+    )
+    risk_level: LessonRiskLevel = Field(
+        default=LessonRiskLevel.MEDIUM, description="Sensitivity classification tier."
+    )
+    supporting_event_ids: Tuple[str, ...] = Field(
+        default_factory=tuple, description="IDs of corroborating ExperienceEvents."
+    )
+    contradicting_event_ids: Tuple[str, ...] = Field(
+        default_factory=tuple, description="IDs of contradicting ExperienceEvents."
+    )
+    supporting_evidence_ids: Tuple[str, ...] = Field(
+        default_factory=tuple, description="IDs of linked EKM memory_evidence records."
+    )
+    confirmation_count: int = Field(
+        default=1, ge=0, description="Number of successful corroborating executions."
+    )
+    contradiction_count: int = Field(
+        default=0, ge=0, description="Number of contradicting failure executions."
+    )
+    trust_level: MemoryTrustLevel = Field(
+        default=MemoryTrustLevel.M1, description="Current provenance trust level."
+    )
+    fact_id: Optional[str] = Field(
+        default=None, description="Linked canonical memory_facts ID when approved."
+    )
+    is_superseded: bool = Field(default=False, description="Whether replaced by newer lesson.")
+    superseded_by: Optional[str] = Field(default=None, description="Successor lesson ID.")
+    superseded_reason: Optional[str] = Field(default=None, description="Supersession reason.")
+    created_at: str = Field(description="ISO 8601 UTC creation timestamp.")
+    updated_at: str = Field(description="ISO 8601 UTC update timestamp.")
+
+
+class LessonProposal(BaseModel):
+    """Payload to propose a new candidate lesson from an execution experience."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=256)
+    trigger_condition: str = Field(min_length=1)
+    recommended_action: str = Field(min_length=1)
+    observation: str = Field(min_length=1)
+    inferred_explanation: str = Field(min_length=1)
+    skill_id: Optional[str] = Field(default=None)
+    project_id: Optional[str] = Field(default=None)
+    risk_level: LessonRiskLevel = Field(default=LessonRiskLevel.MEDIUM)
+
+
 class MemoryQuery(BaseModel):
     """Typed query criteria for selective EKM memory retrieval."""
 
@@ -198,6 +289,7 @@ class MemoryQuery(BaseModel):
     )
     project_id: Optional[str] = Field(default=None, description="Active project context scope.")
     task_id: Optional[str] = Field(default=None, description="Active task context scope.")
+    skill_id: Optional[str] = Field(default=None, description="Associated skill context scope.")
     include_global: bool = Field(default=True, description="Whether to include global records.")
     min_trust_level: Optional[MemoryTrustLevel] = Field(
         default=None, description="Minimum required trust level."
@@ -232,3 +324,6 @@ class RetrievalResult(BaseModel):
     provenance_map: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     unresolved_conflicts: List[Dict[str, Any]] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    lessons: List[ExecutionLesson] = Field(
+        default_factory=list, description="Retrieved approved execution lessons."
+    )

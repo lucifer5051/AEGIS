@@ -91,6 +91,9 @@ def build_supervisor(
     clarification_gate: Optional[object] = None,
     admission_controller: Optional[object] = None,
     experience_service: Optional[object] = None,
+    memory_store: Optional[object] = None,
+    retriever: Optional[object] = None,
+    lesson_manager: Optional[object] = None,
 ) -> Supervisor:
     """Convenience factory to wire up a Supervisor with a fresh StateStore.
 
@@ -107,4 +110,7 @@ def build_supervisor(
         clarification_gate=clarification_gate,
         admission_controller=admission_controller,
         experience_service=experience_service,
+        memory_store=memory_store,
+        retriever=retriever,
+        lesson_manager=lesson_manager,
     )

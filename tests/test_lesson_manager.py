@@ -1,4 +1,4 @@
-﻿"""SAGE Evidence-Gated Lesson Lifecycle Test Suite.
+"""SAGE Evidence-Gated Lesson Lifecycle Test Suite.
 
 Canonical Reference:
 - docs/specifications/AEGIS_DOMAIN_SCHEMA_FOUNDATION.md § 4
@@ -45,7 +45,6 @@ from src.memory import (
     EKMMemoryStore,
     EvidenceCreate,
     ExecutionLesson,
-    FactCreate,
     LessonManager,
     LessonProposal,
     LessonRiskLevel,
@@ -199,7 +198,8 @@ def test_03_low_risk_promotes_at_two_confirmations(lesson_mgr: LessonManager) ->
 
 def test_04_medium_risk_lifecycle(lesson_mgr: LessonManager) -> None:
     """4. MEDIUM risk: CANDIDATE -> VERIFIED (at 2) -> APPROVED (at 3)."""
-    lesson = lesson_mgr.propose_candidate(_make_proposal(risk=LessonRiskLevel.MEDIUM), _make_event())
+    proposal = _make_proposal(risk=LessonRiskLevel.MEDIUM)
+    lesson = lesson_mgr.propose_candidate(proposal, _make_event())
     lesson = lesson_mgr.corroborate_lesson(lesson.lesson_id, _make_event())
     assert lesson.state == LessonState.VERIFIED
     assert lesson.fact_id is None
@@ -211,7 +211,7 @@ def test_04_medium_risk_lifecycle(lesson_mgr: LessonManager) -> None:
 def test_05_high_risk_requires_four_confirmations(lesson_mgr: LessonManager) -> None:
     """5. HIGH risk without user confirm requires 4 total confirmations."""
     lesson = lesson_mgr.propose_candidate(_make_proposal(risk=LessonRiskLevel.HIGH), _make_event())
-    for i in range(2):
+    for _i in range(2):
         lesson = lesson_mgr.corroborate_lesson(lesson.lesson_id, _make_event())
         assert lesson.state in (LessonState.CANDIDATE, LessonState.VERIFIED)
     lesson = lesson_mgr.corroborate_lesson(lesson.lesson_id, _make_event())
@@ -284,7 +284,9 @@ def test_11_supersession_links_lessons(lesson_mgr: LessonManager) -> None:
     """11. supersede_lesson marks old lesson SUPERSEDED linked to successor."""
     old = lesson_mgr.propose_candidate(_make_proposal(risk=LessonRiskLevel.LOW), _make_event())
     new = lesson_mgr.propose_candidate(_make_proposal(risk=LessonRiskLevel.LOW), _make_event())
-    old_sup = lesson_mgr.supersede_lesson(old.lesson_id, new.lesson_id, "Replaced by refined lesson")
+    old_sup = lesson_mgr.supersede_lesson(
+        old.lesson_id, new.lesson_id, "Replaced by refined lesson"
+    )
     assert old_sup.state == LessonState.SUPERSEDED
     assert old_sup.superseded_by == new.lesson_id
     assert old_sup.is_superseded is True
@@ -346,12 +348,12 @@ def test_15_list_filtering_by_project(lesson_mgr: LessonManager) -> None:
     )
 
     alpha_only = lesson_mgr.list_lessons(project_id="proj-alpha", include_global=False)
-    assert all(l.project_id == "proj-alpha" for l in alpha_only)
+    assert all(item.project_id == "proj-alpha" for item in alpha_only)
 
     alpha_with_global = lesson_mgr.list_lessons(project_id="proj-alpha", include_global=True)
-    assert any(l.project_id is None for l in alpha_with_global)
-    assert any(l.project_id == "proj-alpha" for l in alpha_with_global)
-    assert all(l.project_id != "proj-beta" for l in alpha_with_global)
+    assert any(item.project_id is None for item in alpha_with_global)
+    assert any(item.project_id == "proj-alpha" for item in alpha_with_global)
+    assert all(item.project_id != "proj-beta" for item in alpha_with_global)
 
 
 def test_16_list_filtering_by_state(lesson_mgr: LessonManager) -> None:
@@ -362,16 +364,20 @@ def test_16_list_filtering_by_state(lesson_mgr: LessonManager) -> None:
 
     candidates = lesson_mgr.list_lessons(states=[LessonState.CANDIDATE])
     approved = lesson_mgr.list_lessons(states=[LessonState.APPROVED])
-    assert all(l.state == LessonState.CANDIDATE for l in candidates)
-    assert all(l.state == LessonState.APPROVED for l in approved)
+    assert all(item.state == LessonState.CANDIDATE for item in candidates)
+    assert all(item.state == LessonState.APPROVED for item in approved)
 
 
 def test_17_list_filtering_by_skill(lesson_mgr: LessonManager) -> None:
     """17. list_lessons filters by skill_id."""
-    lesson_mgr.propose_candidate(_make_proposal(skill_id="skill-a"), _make_event(skill_id="skill-a"))
-    lesson_mgr.propose_candidate(_make_proposal(skill_id="skill-b"), _make_event(skill_id="skill-b"))
+    lesson_mgr.propose_candidate(
+        _make_proposal(skill_id="skill-a"), _make_event(skill_id="skill-a")
+    )
+    lesson_mgr.propose_candidate(
+        _make_proposal(skill_id="skill-b"), _make_event(skill_id="skill-b")
+    )
     skill_a_lessons = lesson_mgr.list_lessons(skill_id="skill-a")
-    assert all(l.skill_id == "skill-a" for l in skill_a_lessons)
+    assert all(item.skill_id == "skill-a" for item in skill_a_lessons)
 
 
 def test_18_in_memory_mode_lifecycle(lesson_mgr_mem_only: LessonManager) -> None:
@@ -412,7 +418,8 @@ def test_20_observation_vs_inferred_explanation_distinction(lesson_mgr: LessonMa
 
 def test_21_fact_id_only_after_approved(lesson_mgr: LessonManager) -> None:
     """21. fact_id is None until APPROVED; populated on promotion."""
-    lesson = lesson_mgr.propose_candidate(_make_proposal(risk=LessonRiskLevel.MEDIUM), _make_event())
+    proposal = _make_proposal(risk=LessonRiskLevel.MEDIUM)
+    lesson = lesson_mgr.propose_candidate(proposal, _make_event())
     assert lesson.fact_id is None
     lesson = lesson_mgr.corroborate_lesson(lesson.lesson_id, _make_event())
     assert lesson.state == LessonState.VERIFIED
@@ -472,4 +479,3 @@ def test_24_lesson_never_grants_capabilities(lesson_mgr: LessonManager) -> None:
     assert not hasattr(lesson, "trust_policy")
     assert not hasattr(lesson, "capability_grant")
     assert lesson.fact_id is not None
-

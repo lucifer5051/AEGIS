@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.manager.context import ContextIR
+from src.manager.context import ContextIR, ExecutionLessonContext
 from src.memory.models import MemoryCategory, MemoryRecord, RetrievalResult
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,8 @@ class CompiledContext(BaseModel):
     budget_allocated: int
     included_record_ids: List[str] = Field(default_factory=list)
     omitted_record_ids: List[str] = Field(default_factory=list)
+    included_lesson_ids: List[str] = Field(default_factory=list)
+    omitted_lesson_ids: List[str] = Field(default_factory=list)
     unresolved_conflicts: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -98,8 +100,16 @@ class ContextCompiler:
         omitted_ids: List[str] = []
         current_consumed_tokens = 0
 
+        # Collect fact_ids from lessons for deduplication
+        lesson_fact_ids = {les.fact_id for les in getattr(retrieval, "lessons", []) if les.fact_id}
+
         # Candidates are already sorted by relevance/trust from EKMRetriever
         for record in retrieval.records:
+            # Deduplicate against lessons: do not duplicate an EKM fact representing
+            # a lesson that is already represented distinctly
+            if record.memory_id in lesson_fact_ids:
+                continue
+
             entry_text = f"{record.title}: {record.content}"
             est, _, _ = estimate_tokens(entry_text)
             if current_consumed_tokens + est <= available_budget:
@@ -107,6 +117,53 @@ class ContextCompiler:
                 current_consumed_tokens += est
             else:
                 omitted_ids.append(record.memory_id)
+
+        # Process lessons within the remaining context budget
+        included_lessons: List[ExecutionLessonContext] = []
+        included_lesson_ids: List[str] = []
+        omitted_lesson_ids: List[str] = []
+
+        for les in getattr(retrieval, "lessons", []):
+            les_text = (
+                f"{les.title} {les.trigger_condition} {les.recommended_action} "
+                f"{les.observation} {les.inferred_explanation}"
+            )
+            les_est, _, _ = estimate_tokens(les_text)
+            if current_consumed_tokens + les_est <= available_budget:
+                risk_str = (
+                    les.risk_level.value
+                    if hasattr(les.risk_level, "value")
+                    else str(les.risk_level)
+                )
+                state_str = les.state.value if hasattr(les.state, "value") else str(les.state)
+                trust_str = (
+                    les.trust_level.value
+                    if hasattr(les.trust_level, "value")
+                    else str(les.trust_level)
+                )
+                included_lessons.append(
+                    ExecutionLessonContext(
+                        lesson_id=les.lesson_id,
+                        title=les.title,
+                        trigger_condition=les.trigger_condition,
+                        recommended_action=les.recommended_action,
+                        observation=les.observation,
+                        inferred_explanation=les.inferred_explanation,
+                        risk_level=risk_str,
+                        lifecycle_state=state_str,
+                        supporting_evidence_ids=list(les.supporting_evidence_ids),
+                        supporting_event_ids=list(les.supporting_event_ids),
+                        project_id=les.project_id,
+                        skill_id=les.skill_id,
+                        trust_level=trust_str,
+                        confidence=1.0,
+                        confirmation_count=les.confirmation_count,
+                    )
+                )
+                included_lesson_ids.append(les.lesson_id)
+                current_consumed_tokens += les_est
+            else:
+                omitted_lesson_ids.append(les.lesson_id)
 
         # Extract preferences, facts, and entity descriptions
         relevant_preferences: List[str] = []
@@ -128,6 +185,7 @@ class ContextCompiler:
             task_id=task_id or retrieval.query.task_id,
             relevant_preferences=relevant_preferences,
             relevant_facts=relevant_facts,
+            relevant_lessons=included_lessons,
             recent_events=[],
             constraints=constraints,
             available_token_budget=budget,
@@ -143,5 +201,7 @@ class ContextCompiler:
             budget_allocated=budget,
             included_record_ids=[r.memory_id for r in included_records],
             omitted_record_ids=omitted_ids,
+            included_lesson_ids=included_lesson_ids,
+            omitted_lesson_ids=omitted_lesson_ids,
             unresolved_conflicts=retrieval.unresolved_conflicts,
         )
