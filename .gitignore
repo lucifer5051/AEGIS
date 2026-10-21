@@ -46,6 +46,7 @@ secrets/
 *.safetensors
 models/weights/
 runtime/models/
+resrch papers/
 
 # Database and local state (Transient / caches)
 *.sqlite

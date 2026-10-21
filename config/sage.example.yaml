@@ -59,6 +59,19 @@ channels:
   desktop_enabled: true
   whatsapp_enabled: false
   channel_affinity_enforced: true
+  telegram:
+    enabled: false
+    bot_token_env: "SAGE_TELEGRAM_BOT_TOKEN"
+    allowed_user_ids: []
+    allowed_chat_ids: []
+    poll_timeout_seconds: 30
+    request_timeout_seconds: 35.0
+    max_poll_limit: 20
+    retry_attempts: 3
+    retry_backoff_seconds: 2.0
+    max_message_length: 4096
+    rate_limit_per_minute: 20
+    workspace_alias: "workspace"
 
 notifications:
   desktop_notifications_enabled: true

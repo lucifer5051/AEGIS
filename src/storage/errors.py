@@ -24,6 +24,10 @@ class DatabaseLockedError(DatabaseConnectionError):
     """Raised when database lock contention exceeds configured busy timeout."""
 
 
+class DatabaseDrainingError(DatabaseConnectionError):
+    """Raised when an operation is attempted on a database that is currently draining for rotation."""
+
+
 class DatabaseCorruptError(StorageError):
     """Raised when database file integrity check fails or structure is malformed."""
 

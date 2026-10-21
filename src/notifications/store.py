@@ -23,6 +23,7 @@ from src.notifications.models import (
     NotificationPriority,
     NotificationStatus,
 )
+from src.storage.database import assert_not_draining
 from src.trust.audit import _check_no_secrets
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,7 @@ class NotificationStore:
             updated_at=now,
         )
 
+        assert_not_draining(self._conn)  # SEC-044-03: gate direct BEGIN IMMEDIATE write
         try:
             self._conn.execute("BEGIN IMMEDIATE;")
             self._conn.execute(
@@ -214,6 +216,7 @@ class NotificationStore:
             delivery_attempts if delivery_attempts is not None else existing.delivery_attempts
         )
 
+        assert_not_draining(self._conn)  # SEC-044-03: gate direct BEGIN IMMEDIATE write
         try:
             self._conn.execute("BEGIN IMMEDIATE;")
             self._conn.execute(
@@ -294,6 +297,7 @@ class NotificationStore:
             response_summary=response_summary,
         )
 
+        assert_not_draining(self._conn)  # SEC-044-03: gate direct BEGIN IMMEDIATE write
         try:
             self._conn.execute("BEGIN IMMEDIATE;")
             self._conn.execute(

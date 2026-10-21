@@ -476,14 +476,164 @@ class NetworkConfig(AegisBaseConfig):
 # ==============================================================================
 
 
+class TelegramConfig(AegisBaseConfig):
+    """Telegram secure remote-control gateway configuration.
+
+    Zero-secret invariant: bot token is NEVER stored in YAML or configuration models.
+    At runtime, it is retrieved from the specified environment variable
+    (e.g., SAGE_TELEGRAM_BOT_TOKEN).
+    """
+
+    enabled: bool = Field(
+        default=False, description="Explicit enable/disable flag. Disabled by default."
+    )
+    bot_token_env: str = Field(
+        default="SAGE_TELEGRAM_BOT_TOKEN",
+        description="Environment variable name containing the Telegram bot token.",
+    )
+    allowed_user_ids: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Explicit allowlist of numeric Telegram user IDs permitted to interact with SAGE."
+        ),
+    )
+    allowed_chat_ids: List[int] = Field(
+        default_factory=list,
+        description=(
+            "Explicit allowlist of numeric Telegram private chat IDs permitted "
+            "to interact with SAGE. Must be non-empty when gateway is enabled."
+        ),
+    )
+    poll_timeout_seconds: int = Field(
+        default=30, ge=1, le=120, description="Long polling timeout in seconds."
+    )
+    request_timeout_seconds: float = Field(
+        default=35.0, ge=5.0, le=180.0, description="HTTP request timeout in seconds."
+    )
+    max_poll_limit: int = Field(
+        default=20, ge=1, le=100, description="Maximum updates fetched per polling request."
+    )
+    retry_attempts: int = Field(
+        default=3, ge=1, le=10, description="Maximum retries on transient transport errors."
+    )
+    retry_backoff_seconds: float = Field(
+        default=2.0, ge=0.5, le=30.0, description="Base backoff delay in seconds."
+    )
+    max_message_length: int = Field(
+        default=4096, ge=1, le=8192, description="Maximum message character limit."
+    )
+    rate_limit_per_minute: int = Field(
+        default=20, ge=1, le=120, description="Maximum incoming messages per minute per user."
+    )
+    workspace_alias: str = Field(
+        default="workspace", description="Configured workspace directory alias."
+    )
+
+    @model_validator(mode="after")
+    def validate_telegram_gateway_config(self) -> "TelegramConfig":
+        """Validate that if gateway is enabled, required settings are present."""
+        if self.enabled:
+            if not self.allowed_user_ids:
+                raise ValueError(
+                    "Telegram remote gateway is enabled but 'allowed_user_ids' is empty. "
+                    "At least one numeric Telegram user ID must be allowlisted."
+                )
+            for uid in self.allowed_user_ids:
+                if uid <= 0:
+                    raise ValueError(
+                        f"Invalid allowed_user_id {uid}. "
+                        "Numeric user IDs must be positive integers."
+                    )
+            if not self.allowed_chat_ids:
+                raise ValueError(
+                    "Telegram remote gateway is enabled but 'allowed_chat_ids' is empty. "
+                    "At least one numeric Telegram private chat ID must be allowlisted."
+                )
+            for cid in self.allowed_chat_ids:
+                if cid <= 0:
+                    raise ValueError(
+                        f"Invalid allowed_chat_id {cid}. Group and channel chat IDs "
+                        "(negative or zero) are strictly prohibited in allowed_chat_ids."
+                    )
+            if not self.bot_token_env or not self.bot_token_env.strip():
+                raise ValueError(
+                    "Telegram remote gateway is enabled but 'bot_token_env' is not specified."
+                )
+        return self
+
+
+class WhatsAppConfig(AegisBaseConfig):
+    """WhatsApp secure remote-control gateway configuration.
+
+    Local-first, zero-cloud invariant: uses a local Baileys sidecar process.
+    Group chats and broadcast channels are strictly prohibited.
+    """
+
+    enabled: bool = Field(
+        default=False, description="Explicit enable/disable flag. Disabled by default."
+    )
+    allowed_jids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Explicit allowlist of WhatsApp JIDs or normalized E.164 phone numbers "
+            "permitted to interact with SAGE. Must be non-empty when gateway is enabled."
+        ),
+    )
+    session_path: str = Field(
+        default="%USERPROFILE%\\.aegis\\channels\\whatsapp\\session",
+        description="Isolated local filesystem directory for Baileys MultiFileAuthState.",
+    )
+    max_message_length: int = Field(
+        default=4096, ge=1, le=8192, description="Maximum message character limit."
+    )
+    rate_limit_per_minute: int = Field(
+        default=20, ge=1, le=120, description="Maximum incoming messages per minute per user."
+    )
+    require_outbound_approval: bool = Field(
+        default=True,
+        description=(
+            "Whether AI-generated outbound WhatsApp messages require explicit human approval."
+        ),
+    )
+    receive_only: bool = Field(
+        default=False,
+        description="Strict receive-only mode. Outbound sends and autonomous replies are disabled.",
+    )
+    presence_state: str = Field(
+        default="AVAILABLE",
+        description="Human availability state ('AVAILABLE', 'BUSY', 'DND', 'OFF').",
+    )
+
+    @model_validator(mode="after")
+    def validate_whatsapp_gateway_config(self) -> "WhatsAppConfig":
+        """Validate that if WhatsApp gateway is enabled, required settings are present."""
+        if self.enabled:
+            if not self.allowed_jids:
+                raise ValueError(
+                    "WhatsApp remote gateway is enabled but 'allowed_jids' is empty. "
+                    "At least one WhatsApp JID or phone number must be allowlisted."
+                )
+            for jid in self.allowed_jids:
+                if not jid or not jid.strip():
+                    raise ValueError("Empty or whitespace JID in allowed_jids is prohibited.")
+                if "@g.us" in jid or "@broadcast" in jid or "group" in jid.lower():
+                    raise ValueError(
+                        f"Invalid allowed_jid '{jid}'. Group and broadcast destinations "
+                        "are strictly prohibited."
+                    )
+        return self
+
+
 class ChannelConfig(AegisBaseConfig):
     """Channel interfaces and affinity rules."""
 
     desktop_enabled: bool = Field(default=True)
     whatsapp_enabled: bool = Field(default=False)
     channel_affinity_enforced: bool = Field(
-        default=True, description="Ensures responses return exclusively to the originating channel."
+        default=True,
+        description="Ensures responses return exclusively to the originating channel.",
     )
+
     allow_cross_channel_notifications: bool = Field(
         default=False,
         description="Cross-channel notifications permitted only through explicit user policy.",
@@ -492,6 +642,8 @@ class ChannelConfig(AegisBaseConfig):
         default_factory=lambda: ["P0"],
         description="Priorities eligible for cross-channel routing when enabled.",
     )
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
 
 
 # ==============================================================================

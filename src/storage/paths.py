@@ -60,6 +60,16 @@ def get_default_backups_dir() -> Path:
     return get_default_aegis_home() / "backups"
 
 
+def get_default_keys_dir() -> Path:
+    """Return local directory for protected cryptographic keys (%USERPROFILE%\\.aegis\\keys)."""
+    return get_default_sage_home() / "keys"
+
+
+def get_default_db_key_path() -> Path:
+    """Return default protected database encryption key path."""
+    return get_default_keys_dir() / "aegis_db.key.enc"
+
+
 def _get_canonical_repo_root() -> Path:
     """Locate current canonical Git repository root safely."""
     # Anchored relative to this file: src/storage/paths.py -> root is 2 levels up

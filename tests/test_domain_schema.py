@@ -119,10 +119,10 @@ def _get_tables(conn: sqlite3.Connection) -> List[str]:
 
 
 def test_01_all_domain_migrations_apply() -> None:
-    """All migrations (0001-0008) apply without error."""
+    """All migrations (0001-0009) apply without error."""
     with _tmp_db() as conn:
         version = get_current_schema_version(conn)
-        assert version == 8
+        assert version == 9
 
 
 def test_02_migration_ordering_is_correct() -> None:
@@ -130,7 +130,7 @@ def test_02_migration_ordering_is_correct() -> None:
     migrations = load_migrations_from_directory(MIGRATIONS_DIR)
     versions = [m.version for m in migrations]
     assert versions == sorted(versions)
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 
 def test_03_foreign_keys_enabled() -> None:
@@ -141,9 +141,9 @@ def test_03_foreign_keys_enabled() -> None:
 
 
 def test_04_schema_version_after_all_migrations() -> None:
-    """Schema version is 8 after all migrations applied."""
+    """Schema version is 9 after all migrations applied."""
     with _tmp_db() as conn:
-        assert get_current_schema_version(conn) == 8
+        assert get_current_schema_version(conn) == 9
 
 
 def test_05_migration_rerun_is_safe() -> None:
@@ -158,7 +158,7 @@ def test_05_migration_rerun_is_safe() -> None:
         apply_migrations(conn, migrations)
         # Re-apply — must not raise or duplicate
         applied = apply_migrations(conn, migrations)
-        assert len(applied) == 8
+        assert len(applied) == 9
         conn.close()
     finally:
         if conn is not None:
@@ -201,6 +201,8 @@ def test_06_expected_domain_tables_exist() -> None:
         "schedule_executions",
         "notifications",
         "notification_attempts",
+        "gateway_updates",
+        "gateway_outbound_messages",
     }
     with _tmp_db() as conn:
         tables = set(_get_tables(conn))
@@ -234,6 +236,8 @@ def test_07_no_unexpected_domain_tables() -> None:
         "schedule_executions",
         "notifications",
         "notification_attempts",
+        "gateway_updates",
+        "gateway_outbound_messages",
     }
     with _tmp_db() as conn:
         tables = set(_get_tables(conn))
@@ -832,7 +836,7 @@ def test_40_no_network_access_in_schema() -> None:
     """Schema operations use only local SQLite; no network access."""
     with _tmp_db() as conn:
         version = get_current_schema_version(conn)
-        assert version == 8
+        assert version == 9
 
 
 # ---------------------------------------------------------------------------
@@ -857,7 +861,7 @@ def test_41_domain_schema_full_smoke_test() -> None:
         # 2. Apply all migrations
         bootstrap_schema_migrations(conn)
         apply_migrations(conn, migrations)
-        assert get_current_schema_version(conn) == 8
+        assert get_current_schema_version(conn) == 9
 
         now = _now_utc()
 
@@ -1390,8 +1394,8 @@ def test_52_migration_0004_idempotency() -> None:
 
         # Apply again
         reapplied = apply_migrations(conn, migrations)
-        assert len(reapplied) == 8
-        assert get_current_schema_version(conn) == 8
+        assert len(reapplied) == 9
+        assert get_current_schema_version(conn) == 9
         assert conn.execute("PRAGMA integrity_check;").fetchone()[0] == "ok"
         conn.close()
     finally:
@@ -1405,16 +1409,16 @@ def test_52_migration_0004_idempotency() -> None:
 
 
 def test_53_migration_checksum_integrity() -> None:
-    """All migrations (0001-0008) maintain valid, strictly monotonic checksums."""
+    """All migrations (0001-0009) maintain valid, strictly monotonic checksums."""
     migrations = load_migrations_from_directory(MIGRATIONS_DIR)
-    assert len(migrations) == 8
+    assert len(migrations) == 9
     for m in migrations:
         computed = compute_sql_checksum(m.sql)
         assert m.checksum == computed, f"Checksum mismatch in migration {m.migration_id}"
 
 
 def test_54_full_migration_from_fresh_database() -> None:
-    """Fresh database migrates from v0 to v8 with all tables, constraints, and indexes."""
+    """Fresh database migrates from v0 to v9 with all tables, constraints, and indexes."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     conn = None
@@ -1425,7 +1429,7 @@ def test_54_full_migration_from_fresh_database() -> None:
 
         migrations = load_migrations_from_directory(MIGRATIONS_DIR)
         apply_migrations(conn, migrations)
-        assert get_current_schema_version(conn) == 8
+        assert get_current_schema_version(conn) == 9
 
         # Verify all tables exist
         tables = _get_tables(conn)
@@ -1453,6 +1457,8 @@ def test_54_full_migration_from_fresh_database() -> None:
             "schedule_executions",
             "notifications",
             "notification_attempts",
+            "gateway_updates",
+            "gateway_outbound_messages",
         }
         assert expected.issubset(set(tables))
         assert conn.execute("PRAGMA foreign_key_check;").fetchall() == []
@@ -1469,7 +1475,7 @@ def test_54_full_migration_from_fresh_database() -> None:
 
 
 def test_55_migration_from_existing_v3_database() -> None:
-    """Upgrading an existing v3 database to v8 preserves data and updates FK cascade."""
+    """Upgrading an existing v3 database to v9 preserves data and updates FK cascade."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
     conn = None
@@ -1501,9 +1507,9 @@ def test_55_migration_from_existing_v3_database() -> None:
             )
             cur.execute(_INS_MSG, (mid2, glob_cid, "user", "system_cli", 1, "V3 Glob Msg", now))
 
-        # 3. Now apply migration 0004, 0005, 0006, 0007, 0008
+        # 3. Now apply migration 0004 through 0009
         apply_migrations(conn, all_migrations)
-        assert get_current_schema_version(conn) == 8
+        assert get_current_schema_version(conn) == 9
 
         # 4. Verify all pre-existing data was preserved
         assert conn.execute("SELECT COUNT(*) FROM conversations;").fetchone()[0] == 2

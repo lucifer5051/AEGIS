@@ -181,6 +181,12 @@ class AuditWriter:
             timestamp=timestamp,
         )
 
+        # SEC-044-03: gate this direct BEGIN IMMEDIATE path against an active drain.
+        # Lazy import avoids the src.storage -> src.trust circular dependency.
+        from src.storage.database import assert_not_draining
+
+        assert_not_draining(self._conn)
+
         try:
             self._conn.execute("BEGIN IMMEDIATE;")
             self._conn.execute(

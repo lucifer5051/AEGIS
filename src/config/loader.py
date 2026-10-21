@@ -87,6 +87,7 @@ def get_env_overrides() -> Dict[str, Any]:
         "AEGIS_TEST_MODE": ("developer", "test_mode"),
         "AEGIS_DESKTOP_ENABLED": ("channels", "desktop_enabled"),
         "AEGIS_WHATSAPP_ENABLED": ("channels", "whatsapp_enabled"),
+        "AEGIS_TELEGRAM_ENABLED": ("channels", "telegram", "enabled"),
     }
 
     canonical_mapping = {
@@ -99,23 +100,33 @@ def get_env_overrides() -> Dict[str, Any]:
         "SAGE_TEST_MODE": ("developer", "test_mode"),
         "SAGE_DESKTOP_ENABLED": ("channels", "desktop_enabled"),
         "SAGE_WHATSAPP_ENABLED": ("channels", "whatsapp_enabled"),
+        "SAGE_TELEGRAM_ENABLED": ("channels", "telegram", "enabled"),
     }
 
-    for env_name, path in legacy_mapping.items():
-        if env_name in os.environ:
-            val = _parse_env_var_value(os.environ[env_name])
-            domain, field = path
-            if domain not in overrides:
-                overrides[domain] = {}
-            overrides[domain][field] = val
+    def _apply_mapping(mapping: Dict[str, tuple[str, ...]]) -> None:
+        for env_name, path in mapping.items():
+            if env_name in os.environ:
+                val = _parse_env_var_value(os.environ[env_name])
+                curr = overrides
+                for seg in path[:-1]:
+                    if seg not in curr:
+                        curr[seg] = {}
+                    curr = curr[seg]
+                curr[path[-1]] = val
 
-    for env_name, path in canonical_mapping.items():
-        if env_name in os.environ:
-            val = _parse_env_var_value(os.environ[env_name])
-            domain, field = path
-            if domain not in overrides:
-                overrides[domain] = {}
-            overrides[domain][field] = val
+    _apply_mapping(legacy_mapping)
+    _apply_mapping(canonical_mapping)
+
+    # Allowed users list parsing
+    for env_k in ("AEGIS_TELEGRAM_ALLOWED_USERS", "SAGE_TELEGRAM_ALLOWED_USERS"):
+        if env_k in os.environ:
+            raw = os.environ[env_k]
+            uids = [int(u.strip()) for u in raw.split(",") if u.strip().lstrip("-").isdigit()]
+            if "channels" not in overrides:
+                overrides["channels"] = {}
+            if "telegram" not in overrides["channels"]:
+                overrides["channels"]["telegram"] = {}
+            overrides["channels"]["telegram"]["allowed_user_ids"] = uids
 
     return overrides
 

@@ -46,7 +46,7 @@ from src.notifications import (
     NotificationStore,
     build_default_adapters,
 )
-from src.storage.database import initialize_runtime_database
+from src.storage.database import create_connection, initialize_runtime_database
 from src.trust.errors import SecretLeakError
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
@@ -395,8 +395,7 @@ def test_08_restart_recovery_state_survives_db_reconnect(tmp_path: Path) -> None
     conn1.close()
 
     # Reopen: state must still be present
-    conn2 = sqlite3.connect(str(db_file))
-    conn2.row_factory = sqlite3.Row
+    conn2 = create_connection(db_file)
     store2 = NotificationStore(conn2)
     mgr2 = NotificationManager(store=store2, adapters=[LocalLogAdapter()])
 

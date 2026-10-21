@@ -38,6 +38,7 @@ from src.memory.models import (
     RelationCreate,
     RetrievalResult,
 )
+from src.memory.contact_memory import EncryptedContactMemoryStore
 from src.memory.retriever import EKMRetriever
 from src.memory.semantic import NullSemanticBackend, SemanticMemoryBackend
 from src.memory.store import EKMMemoryStore
@@ -47,6 +48,7 @@ __all__ = [
     "ContextCompiler",
     "EKMMemoryStore",
     "EKMRetriever",
+    "EncryptedContactMemoryStore",
     "EntityCreate",
     "EvidenceCreate",
     "ExecutionLesson",

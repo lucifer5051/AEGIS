@@ -165,6 +165,7 @@ def test_13_no_unexpected_application_source():
     # In Prompt 021-023, src/manager/, src/reasoning/, src/skills/ are authorized.
     # In Prompt 024, src/memory/ (EKM Memory Runtime) is authorized.
     # In Prompt 027, src/workflow/ and src/scheduler/ are authorized.
+    # In Prompt 032, src/gateway/ (Secure Remote-Control Gateway) is authorized.
     allowed_subdirs = {
         "config",
         "hardware",
@@ -181,6 +182,8 @@ def test_13_no_unexpected_application_source():
         "workflow",
         "scheduler",
         "notifications",
+        "gateway",
+        "security",
         "__pycache__",
     }
     for child in src_dir.iterdir():

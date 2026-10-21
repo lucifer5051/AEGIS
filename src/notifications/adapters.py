@@ -22,7 +22,9 @@ Future adapters to register here:
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
+from typing import Any, Optional
 
 from src.notifications.errors import DeliveryAdapterError
 from src.notifications.models import DeliveryResult, Notification
@@ -131,6 +133,77 @@ class LocalLogAdapter(DeliveryAdapter):
 
 
 # ==============================================================================
+# TELEGRAM NOTIFICATION ADAPTER
+# ==============================================================================
+
+
+class TelegramDeliveryAdapter(DeliveryAdapter):
+    """Delivers notifications to a designated Telegram chat via TelegramTransport.
+
+    Invariants:
+    - Never raises exceptions: encodes failures in DeliveryResult.
+    - Zero secrets: notification payloads are sanitized upstream; error messages are scrubbed.
+    - Does not alter task state on delivery failure.
+    - Group and channel destinations (negative/zero chat IDs) are strictly prohibited.
+    """
+
+    ADAPTER_NAME = "telegram"
+
+    def __init__(self, transport: Any, chat_id: str | int) -> None:
+        self._transport = transport
+        try:
+            int_cid: Optional[int] = int(chat_id)
+        except (ValueError, TypeError):
+            int_cid = None
+
+        if int_cid is not None and int_cid <= 0:
+            raise ValueError(
+                f"Group and channel chat IDs ({chat_id}) are strictly prohibited for TelegramDeliveryAdapter."
+            )
+        self._chat_id = chat_id
+
+    @property
+    def adapter_name(self) -> str:
+        return self.ADAPTER_NAME
+
+    def send(self, notification: Notification) -> DeliveryResult:
+        """Send notification text via TelegramTransport."""
+        try:
+            try:
+                int_cid: Optional[int] = int(self._chat_id)
+            except (ValueError, TypeError):
+                int_cid = None
+
+            if int_cid is not None and int_cid <= 0:
+                return DeliveryResult(
+                    succeeded=False,
+                    adapter=self.ADAPTER_NAME,
+                    error_message=f"Group and channel destinations ({self._chat_id}) are strictly prohibited.",
+                )
+
+            formatted_text = (
+                f"🔔 *[{notification.priority.value}] {notification.title}*\n\n{notification.body}"
+            )
+            res = self._transport.send_message(chat_id=self._chat_id, text=formatted_text)
+            return DeliveryResult(
+                succeeded=True,
+                adapter=self.ADAPTER_NAME,
+                response_summary=f"msg_id={res.get('result', {}).get('message_id', 'unknown')}",
+            )
+        except Exception as exc:
+            raw_err = str(exc)
+            clean_err = re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot<REDACTED_BOT_TOKEN>", raw_err)
+            clean_err = re.sub(r"sk-[A-Za-z0-9_-]{20,}", "<REDACTED_SECRET>", clean_err)
+            clean_err = re.sub(r"ghp_[A-Za-z0-9]{30,}", "<REDACTED_SECRET>", clean_err)
+            logger.warning("Telegram notification delivery failed: %s", clean_err)
+            return DeliveryResult(
+                succeeded=False,
+                adapter=self.ADAPTER_NAME,
+                error_message=f"Telegram delivery failed: {clean_err}",
+            )
+
+
+# ==============================================================================
 # FACTORY
 # ==============================================================================
 
@@ -149,6 +222,7 @@ def build_default_adapters() -> list[DeliveryAdapter]:
 __all__ = [
     "DeliveryAdapter",
     "LocalLogAdapter",
+    "TelegramDeliveryAdapter",
     "DeliveryAdapterError",
     "build_default_adapters",
 ]

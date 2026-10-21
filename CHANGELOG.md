@@ -3,6 +3,249 @@
 All notable implementation milestones are recorded here.  
 Entries follow **[Prompt ID] — YYYY-MM-DD** ordering, newest first.
 
+## [Prompt 045] — 2026-10-21
+
+### Critical Database Key Rotation Concurrency Remediation (SEC-044-01 through SEC-044-07)
+
+**Status:** IMPLEMENTED & VERIFIED — Remediated all critical and high severity concurrency and cross-process vulnerabilities discovered in the Prompt 044 security audit:
+- **SEC-044-01 (Startup Recovery Concurrency Race):**
+  - Wrapped `recover_interrupted_rotation()` in `initialize_runtime_database()` (`src/storage/database.py`) with `ExclusiveDatabaseLock(validated_path, timeout_sec=10.0)`.
+  - Concurrently booting processes that encounter an active rotation catch `RotationLockError` and gracefully skip startup recovery without unlinking staging files or racing against the active rotation coordinator.
+- **SEC-044-02 & SEC-044-06 (Data Loss Race & Content Mutation Parity Detection):**
+  - Enhanced `_collect_table_counts()` in `src/security/database_key_rotation.py` to calculate an XOR-CRC32 content fingerprint over all table rows, guaranteeing that in-place `UPDATE` operations, paired `DELETE`/`INSERT`, and trigger mutations are detected even when row count remains unchanged.
+  - Added pre-swap verification of `can_acquire_exclusive_file_access(validated_path)` immediately prior to DPAPI key commitment.
+- **SEC-044-03 (Store Write Path Draining Gating):**
+  - Exposed `assert_not_draining(conn: SQLiteConnection)` helper in `src/storage/database.py` and exported it via `src/storage/__init__.py`.
+  - Added explicit drain checks before `BEGIN IMMEDIATE` across all write paths in `NotificationStore` (`src/notifications/store.py`) and `AuditWriter` (`src/trust/audit.py`), guaranteeing that direct SQL write commands cannot execute while key rotation is draining.
+- **SEC-044-07 (Atomic .drain File Publication):**
+  - Updated `ConnectionCoordinator.set_drain()` in `src/storage/database.py` to write JSON payload to a sibling `.drain.tmp` file and atomically rename via `os.replace()`, preventing external processes from observing partial or corrupted JSON metadata.
+- **Real Subprocess & Concurrency Verification (`tests/test_database_encryption.py`):**
+  - Added 5 new verification tests (`test_33` through `test_37`):
+    - `test_33`: Startup recovery under active rotation lock preserves staging artifacts.
+    - `test_34`: Direct store write methods in `NotificationStore` and `AuditWriter` raise `DatabaseDrainingError` during drain.
+    - `test_35`: Parity verification detects row content `UPDATE` without count changes.
+    - `test_36`: Atomic `.drain` file creation and cleanup verification.
+    - `test_37`: Real independent Python OS process (via `subprocess.run([sys.executable, ...])`) is blocked by active `.drain` file.
+  - Encryption suite: 37/37 passed in 5.87s.
+  - Full regression suite in canonical virtual environment: 722/722 passed in 76.60s (0 failures, 100% pass rate).
+
+## [Prompt 043] — 2026-10-20
+
+### Coordinated Database Connection Draining & Windows File-Replacement Contention Remediation (Risk A)
+
+**Status:** IMPLEMENTED & VERIFIED — Remediated Risk A from Prompt 042 by implementing coordinated in-process connection tracking, cross-process advisory draining, admission control, graceful transaction completion, pre-swap parity verification, and bounded Windows filesystem replacement retries:
+- **Connection Coordinator & Cross-Process Protocol (`src/storage/database.py`):**
+  - Built `ConnectionCoordinator` maintaining an in-process connection registry and cross-process advisory drain file (`<db>.drain`) with JSON metadata (coordinator PID, timestamp, timeout).
+  - Implemented admission control in `create_connection()` and `open_database()` rejecting new connections with `DatabaseDrainingError` when draining is active.
+  - Implemented transaction admission gating in `transaction()` preventing new transactions from starting while draining.
+  - Draining closes idle connections immediately and marks active in-flight transactions for graceful closure upon transaction exit.
+  - Built `can_acquire_exclusive_file_access()` utilizing Win32 `kernel32.CreateFileW(..., FILE_SHARE_NONE)` to deterministically verify that 0 operating system file handles are held on the database or WAL file prior to replacement.
+- **Rotation Pipeline Hardening (`src/security/database_key_rotation.py`):**
+  - Integrated `ConnectionCoordinator.drain()` inside `ExclusiveDatabaseLock` with configurable `drain_timeout_sec` (default 15.0s).
+  - Explicitly verifies `PRAGMA wal_checkpoint(TRUNCATE)` return values `(busy, log, checkpointed)`, failing closed if `busy == 1`.
+  - Added pre-swap active database row count parity verification (`_collect_table_counts`) immediately before committing the new key, preventing silent write losses between staging export and swap.
+  - Wrapped `os.replace` on database publication and journal recording in bounded retry loops with exponential backoff (5 attempts) to absorb transient Windows filesystem locks.
+  - Added guaranteed drain cleanup in outer `finally:` block across both success and failure, and ensured startup recovery (`recover_interrupted_rotation`) unlinks lingering `.drain` files.
+- **Comprehensive Concurrency & Conformance Tests (`tests/test_database_encryption.py`):**
+  - Added 10 tests (`test_23` through `test_32`) covering active reader draining, writer transaction wait, connection rejection while draining, drain timeout safe abort, pre-swap concurrent write detection, WAL busy outcome handling, cross-process `.drain` file enforcement, Windows bounded replace retries, connection resumption post-drain, and 100% multi-table record fidelity.
+  - Encryption suite: 32/32 tests passed in 6.25s.
+  - Full project regression suite in canonical virtual environment: 717/717 passed in 71.74s (0 failures, 100% pass rate).
+
+## [Prompt 040] — 2026-10-20
+
+### Coordinated Database Master Key Rotation & Disaster Recovery Subsystem (Remediation of SEC-038-02)
+
+**Status:** IMPLEMENTED & VERIFIED — Remediated finding SEC-038-02 by replacing isolated keyfile overwrites with coordinated, transactional whole-database rekeying via staged `sqlcipher_export`, crash-resilient journaled state recovery, non-signaling Win32 cross-process concurrency locking, monotonic key versioning with historical archive, and managed backup rekeying:
+- **Coordinated Key Rotation Subsystem (`src/security/database_key_rotation.py`):**
+  - Built `rotate_database_key()` executing transactional database rekeying:
+    - Creates an encrypted pre-rotation snapshot under the active key before mutating files.
+    - Checkpoints active WAL frames via `PRAGMA wal_checkpoint(TRUNCATE);`.
+    - Staged rekey export via native `ATTACH ... KEY "x'<new_key>'"` and `SELECT sqlcipher_export('staged')`.
+    - Cryptographic verification (`PRAGMA integrity_check`) and strict table/row-count parity comparison between source and staged databases prior to commitment.
+    - Commits new key to DPAPI-backed keyfile, archives prior key version, and atomically replaces database via `os.replace`.
+    - Explicitly verifies fail-closed rejection of old key material (`_verify_key_rejected`) and authentication under new key.
+    - Automatically synchronizes all managed backups in `%USERPROFILE%\.aegis\backups\` to the new key.
+- **Crash Recovery & State Journaling (`RotationJournal`, `recover_interrupted_rotation`):**
+  - Built durable JSON journal recording state machine progression (`PREPARING`, `SNAPSHOT_CREATED`, `STAGING_EXPORTED`, `STAGING_VERIFIED`, `KEY_COMMITTED`, `DATABASE_COMMITTED`).
+  - Implemented `recover_interrupted_rotation()`: deterministically rolls back pre-key commit failures (cleaning staging files and journal) or rolls forward post-key commit states (completing atomic swap and backup synchronization).
+  - Integrated startup recovery check directly into `initialize_runtime_database()` in `src/storage/database.py`.
+- **Cross-Process Concurrency Locking (`ExclusiveDatabaseLock`):**
+  - Mutual exclusion lock (`<db>.rotation.lock`) preventing concurrent rotations or boot-time races.
+  - Stale lock detection with non-signaling Win32 process liveness check via `kernel32.OpenProcess` and `GetExitCodeProcess`, resolving console process group `CTRL_C_EVENT` termination bugs on Windows.
+- **Monotonic Key Versioning & Historical Archive (`src/security/database_key.py`):**
+  - Updated `DatabaseKeyManager` with monotonic versioning (`version`, `commit_new_key`, `archive_current_key`).
+  - Retains DPAPI-protected historical key versions to guarantee older external or offline backups remain decryptable via `get_key(version=N)`.
+- **Comprehensive Test Suite & Verification (`tests/test_database_encryption.py`):**
+  - Expanded test suite to 22 tests including successful rotation, failure injection, crash recovery (both rollback and roll-forward), lock concurrency, and historical archive restoration.
+  - All 22 tests pass in 2.71s. Full project regression suite in canonical virtual environment: 707 passed in 64.25s (0 failures, 100% pass rate).
+
+## [Prompt 039] — 2026-10-18
+
+### Encrypted Backups & Safe Migration Recovery (Remediation of SEC-038-01)
+
+**Status:** IMPLEMENTED & VERIFIED — Remediated finding SEC-038-01 by replacing raw `shutil.copy2` pre-migration plaintext backups with native SQLCipher page-level encrypted snapshots, active WAL checkpointing, atomic verified publication, independent backup restoration, and safe legacy backup remediation:
+- **Encrypted Migration Backups (`src/storage/database.py`):**
+  - Eliminated plaintext database copies prior to encryption migration.
+  - Added transaction flushing and WAL checkpointing (`PRAGMA wal_checkpoint(TRUNCATE)`) before snapshotting to ensure consistent recovery points.
+  - Utilizes SQLCipher's native `sqlcipher_export` to write an encrypted snapshot to an isolated staging file (`<stem>_backup_<uuid>.staging`) protected by the DPAPI-backed master database key.
+  - Verified staging backup cryptographically (`PRAGMA integrity_check == "ok"` and `is_database_encrypted`) before publication.
+  - Atomically publishes verified encrypted backup via `os.replace` to `<stem>_pre_encryption_backup.db`.
+  - Fail-closed guarantees: if backup creation, export, or verification fails, the unencrypted source database is preserved completely intact, all staging artifacts are purged, and migration aborts.
+- **Programmatic Backup Restoration (`restore_database_from_backup`):**
+  - Added programmatic restore utility supporting both encrypted target databases (preserving SQLCipher security) and plaintext export targets (for emergency/disaster-recovery inspection).
+  - Validates target directory, decrypts/copies via authenticated SQLCipher engine, and validates schema integrity post-restoration.
+- **Legacy Plaintext Backup Remediation & Safe Inspection (`scan_legacy_plaintext_backups`, `remediate_legacy_backup`):**
+  - Added `scan_legacy_plaintext_backups()`: Non-destructive header inspection (reading only the 16-byte SQLite magic header without reading table rows or payload data) to detect legacy unencrypted backups.
+  - Added `remediate_legacy_backup()`: Safe, opt-in remediation utility. Encrypts legacy plaintext backups using SQLCipher into a verified encrypted snapshot. Requires explicit `dry_run=False` and `remove_plaintext=True` to remove legacy files; strictly no automatic deletion during startup.
+- **Expanded Security Test Suite (`tests/test_database_encryption.py`):**
+  - Added Tests 12-15 covering encrypted backup creation and restoration, WAL checkpoint consistency during snapshotting, failure injection preserving source database, and legacy backup scanning/remediation.
+  - Updated Test 08 to assert encrypted backup verification and zero plaintext leakage.
+  - All 15 tests pass in 1.30s. Full test suite: 700 passed in 64.80s.
+
+## [Prompt 037] — 2026-10-18
+
+### Whole-Database Encryption via SQLCipher & Windows DPAPI Key Management
+
+**Status:** IMPLEMENTED & VERIFIED — Resolved the whole-database encryption blocker in AEGIS using SQLCipher 4.19.0 Community (`sqlcipher3` 0.6.4), Windows DPAPI master key protection, fail-closed connection lifecycle, and zero-data-loss atomic migration:
+- **Master Database Key Management (`src/security/database_key.py`, `src/storage/paths.py`):**
+  - Built `DatabaseKeyManager` managing a cryptographically secure 256-bit CSPRNG master key.
+  - Wrapped at rest using Windows DPAPI (`CryptProtectData` with user security context and secondary entropy binding `b"aegis:database_master_key:v1"`).
+  - Stored at `%USERPROFILE%\.aegis\keys\aegis_db.key.enc`.
+  - Implemented secure key lifecycle methods: `get_or_create_key()`, `get_key()`, `rotate_key()`, and `destroy_key()`.
+  - Zero-secret invariant: key material is strictly excluded from logs, error messages, and exceptions.
+- **SQLCipher Integration & Fail-Closed Connection Engine (`src/storage/database.py`):**
+  - Integrated `sqlcipher3` with fallback detection (`SQLCIPHER_AVAILABLE`).
+  - Standardized exception hierarchy with unified `DatabaseError`, `IntegrityError`, `OperationalError` covering both `sqlite3` and `sqlcipher3`.
+  - Updated `create_connection()`, `open_database()`, and `initialize_runtime_database()` to support `encryption_key` and `encrypted` parameters.
+  - Enforced fail-closed authentication: immediately applies raw binary key via `PRAGMA key = "x'HEX'"` and validates with `SELECT count(*) FROM sqlite_master;`. Fails closed if key is invalid or database header corrupted (zero plaintext fallback).
+  - Configured SQLCipher security settings: AES-256-CBC, 4096-byte pages, HMAC-SHA512 page integrity, and encrypted WAL journals.
+- **Zero-Data-Loss Migration & Disaster Recovery (`src/storage/database.py`):**
+  - Built `migrate_database_to_encrypted()` utility:
+    - Pre-migration verification and idempotent skip for already-encrypted databases.
+    - Timestamped pre-migration backup snapshot in `%USERPROFILE%\.aegis\backups\pre_encryption_snapshot_<ts>.db`.
+    - Staged schema/data export via `sqlcipher_export` preserving all 9 migrations, tables, indexes, triggers, and sequences.
+    - Post-export cryptographic integrity check (`PRAGMA integrity_check`) asserting `ok`.
+    - Atomic file replacement (`os.replace`) with automatic rollback and staging cleanup on failure.
+  - `initialize_runtime_database()` transparently detects and auto-migrates existing plaintext databases upon startup.
+- **Comprehensive Security Test Suite (`tests/test_database_encryption.py`):**
+  - Implemented 11 dedicated Phase E security tests covering page-level encryption, absence of SQLite magic header, zero-plaintext leakage in files and WAL journals, correct key authentication, wrong/missing key fail-closed denial, DPAPI key lifecycle, key length validation, full plaintext-to-encrypted migration with 100% data preservation, interrupted migration safety, and transparent bootstrapper migration.
+  - All 11 tests pass in 0.88s.
+- **Full Regression & Quality Verification:**
+  - 685 tests passed (0 failures) across the entire AEGIS test suite.
+  - `ruff check`, `ruff format`, and `mypy` passing with zero errors.
+- **Security Documentation:**
+  - `docs/AEGIS_DATABASE_ENCRYPTION_AUDIT.md`: Complete audit report detailing baseline findings, cryptographic verification, and resolution of the live-pairing blocker.
+  - `docs/AEGIS_DATABASE_ENCRYPTION_ARCHITECTURE.md`: Detailed two-tier encryption specification, key hierarchy, and PRAGMA settings.
+  - `docs/AEGIS_DATABASE_ENCRYPTION_MIGRATION.md`: Operational runbook, backup verification, and disaster-recovery procedures.
+
+**Tests:** 11 passed · 0 failed in `test_database_encryption.py` · 685 passed · 0 failed in full test suite.  
+**Deliverables:** `src/security/database_key.py`, `src/security/__init__.py`, `src/storage/database.py`, `src/storage/paths.py`, `src/storage/__init__.py`, `src/gateway/store.py`, `tests/test_database_encryption.py`, `tests/test_secure_contact_memory.py`, `tests/test_notifications.py`, `tests/test_environment_validation.py`, `docs/AEGIS_DATABASE_ENCRYPTION_AUDIT.md`, `docs/AEGIS_DATABASE_ENCRYPTION_ARCHITECTURE.md`, `docs/AEGIS_DATABASE_ENCRYPTION_MIGRATION.md`, `docs/AEGIS_PROJECT_STATE.md`, `CHANGELOG.md`.
+
+## [Prompt 036] — 2026-10-18
+
+### Secure Contact Memory & WhatsApp Receive-Only Integration
+
+**Status:** IMPLEMENTED & VERIFIED — Implemented per-contact cryptographic isolation, Windows DPAPI key protection, contact-scoped encrypted memory, supervised receive-only Baileys sidecar bridge, and database at-rest audit:
+- **Per-Contact Cryptographic Foundation (`src/security/`):**
+  - `AES256GCMCipher` (`src/security/crypto.py`): Vetted authenticated encryption (AEAD) using `cryptography.hazmat.primitives.ciphers.aead.AESGCM` with CSPRNG 96-bit nonces (`os.urandom(12)`) and AAD binding (`contact_jid:record_id:version`). Rejects tampering and fails closed with zero partial plaintext.
+  - `WindowsDPAPIKeyProtector` (`src/security/dpapi.py`): Key-wrapping abstraction using Windows DPAPI (`CryptProtectData` / `CryptUnprotectData` via `ctypes.windll.crypt32`) with user security context. Pluggable `KeyProtector` interface with `SoftwareKeyProtector` for cross-platform environments.
+  - `ContactKeyStore` (`src/security/contact_key_store.py`): Manages isolated, random 256-bit DEKs per contact JID. Enforces strict JID canonicalization (`validate_and_normalize_jid`), rejects group and broadcast destinations, and executes cryptographic erasure on demand (`destroy_key`).
+- **Encrypted Contact Memory Subsystem (`src/memory/contact_memory.py`):**
+  - Built `EncryptedContactMemoryStore` storing private contact records in `contact_memory_records`.
+  - Storage-layer isolation: all queries are strictly scoped (`WHERE contact_jid = ?`). Contact A can never view or decrypt Contact B's memory.
+  - Cryptographic erasure: `purge_contact_completely` combines database record deletion with DPAPI key destruction, rendering residual disk blocks permanently undecryptable.
+- **Gateway Contact-Scoped Decryption & Receive-Only Integration (`src/gateway/gateway.py`, `src/config/models.py`):**
+  - Integrated `EncryptedContactMemoryStore` into `ChannelGateway` following the required 12-step processing pipeline.
+  - Added `receive_only: bool` in `WhatsAppConfig` (defaults to False for simulated test backward compatibility; active in receive-only sidecars).
+  - Enforced strict receive-only outbound boundary in `_dispatch_outbound`: suppresses automated replies and external transmission, recording failure status.
+- **Supervised Receive-Only Baileys Sidecar (`src/gateway/baileys_sidecar.py`):**
+  - Implemented `BaileysSidecarSupervisor` managing child process over stdin/stdout JSON-lines protocol (`src/gateway/sidecar_protocol.py`). Stderr dedicated to diagnostic logging; zero network ports exposed.
+  - Unconditional receive-only enforcement: `send_message()` strictly raises `TransportError` preventing outbound sends or autonomous replies.
+- **Database At-Rest Encryption Audit (`docs/AEGIS_DATABASE_ENCRYPTION_AUDIT.md`):**
+  - Comprehensive audit of SQLite persistence layer on Windows Python 3.12.
+  - Documented SQLCipher compiler blocker (no prebuilt wheels on PyPI on Windows Python 3.12).
+  - Documented protection matrix (encrypted contact payloads vs. unencrypted structural metadata).
+  - Explicitly recorded that live account pairing remains blocked until certified whole-database encryption or explicit risk signoff is completed.
+- **Deterministic Security Tests (`tests/test_secure_contact_memory.py`):**
+  - 20 deterministic security tests implemented and verified (Tests 1-10: Encryption & Key Isolation; Tests 11-20: Gateway & WhatsApp Security).
+  - All 20 tests pass. Zero secrets logged. Full suite (90 tests across gateway, whatsapp, notifications, approval, and secure memory) passing.
+
+**Tests:** 20 passed · 0 failed in `test_secure_contact_memory.py` · 90 passed in gateway/security suite · 685 passed in full test suite.  
+**Deliverables:** `src/security/__init__.py`, `src/security/crypto.py`, `src/security/dpapi.py`, `src/security/contact_key_store.py`, `src/memory/contact_memory.py`, `src/gateway/baileys_sidecar.py`, `src/gateway/gateway.py`, `src/config/models.py`, `src/memory/__init__.py`, `tests/test_secure_contact_memory.py`, `docs/AEGIS_DATABASE_ENCRYPTION_AUDIT.md`, `CHANGELOG.md`, `docs/AEGIS_PROJECT_STATE.md`.
+
+## [Prompt 035] — 2026-10-18
+
+### Phase 9C.2 Simulated WhatsApp Transport Foundation
+
+**Status:** IMPLEMENTED & VERIFIED — Implemented an offline-only, deterministic simulated WhatsApp transport, sidecar IPC protocol, and channel adapter foundation for SAGE's remote-control gateway:
+- **WhatsApp Configuration (`src/config/models.py`):** Added strongly typed `WhatsAppConfig` with validation for `enabled`, `allowed_jids`, `session_path`, `max_message_length`, `rate_limit_per_minute`, `require_outbound_approval`, and `presence_state`. Integrated into `ChannelConfig.whatsapp`. Rejects group and broadcast JIDs (`@g.us`, `@broadcast`) in allowlists.
+- **Channel Domain Models (`src/gateway/models.py`):** Introduced `ChannelPlatform`, `ConversationType`, `NormalizedInboundMessage`, and `NormalizedOutboundMessage`. Added approval-binding metadata (`content_hash`, `requires_approval`, `approval_id`) to `OutboundMessage`.
+- **Sidecar IPC Protocol (`src/gateway/sidecar_protocol.py`):** Built strict versioned ("1.0") newline-delimited JSON-lines protocol definitions for the future Baileys sidecar bridge. Implemented `parse_sidecar_line` and `serialize_sidecar_envelope` enforcing 64KB max line length, 4096 character text limits, typed event routing (`inbound_message`, `outbound_send`, `outbound_ack`, etc.), and zero-secret scanning.
+- **WhatsApp Channel Adapter (`src/gateway/whatsapp.py`):** Built `WhatsAppAdapter` implementing update parsing and outbound text chunking. Implemented critical CVE-2026-48063 mitigation (drops `requestId` placeholder history sync payloads), rejects inbound group/broadcast messages, discards self-messages (`fromMe=True`), and scrubs secrets.
+- **Simulated WhatsApp Transport (`src/gateway/whatsapp_transport.py`):** Built `SimulatedWhatsAppTransport` with connect/disconnect simulation, FIFO event queueing, synthetic event creation, independent outbound destination validation (rejecting `@g.us` and `@broadcast`), simulated network drop before server ACK (`UNCERTAIN` delivery), and exact-content (`sha256`) and exact-recipient approval enforcement against Trust Core's `ApprovalStore`.
+- **Channel Orchestrator Generalization (`src/gateway/gateway.py`):** Generalized `ChannelGateway` to coordinate both Telegram and WhatsApp channels transparently. Outbound dispatches strictly enforce destination authorization and exact-content approval binding for autonomous messages without bypassing human approval gates.
+- **Offline Test Suite (`tests/test_whatsapp_transport.py`):** Implemented 20 offline tests covering all 14 required areas: private message command routing (/status, /task, /help), unknown contact silent drop, inbound group/broadcast rejection, durable deduplication, malformed payload and CVE-2026-48063 rejection, reconnect and replay, restart persistence, outbound group rejection, exact-content approval binding, tamper invalidation, uncertain delivery status, interrupted task recovery (`reconcile_startup`), secret redaction, and protocol envelope validation.
+
+**Tests:** 20 passed · 0 failed in `test_whatsapp_transport.py` · 64 passed in gateway/notification suites · 661 passed in full test suite (4 expected environmental exclusions: system python isolation check and 3 uninstalled `llama_cpp` tests).  
+**Deliverables:** `src/config/models.py`, `src/gateway/models.py`, `src/gateway/sidecar_protocol.py`, `src/gateway/whatsapp.py`, `src/gateway/whatsapp_transport.py`, `src/gateway/gateway.py`, `src/gateway/__init__.py`, `tests/test_whatsapp_transport.py`, `docs/PHASE_9B_WHATSAPP_ARCHITECTURE.md`, `docs/AEGIS_PROJECT_STATE.md`.
+
+## [Prompt 034] — 2026-10-18
+
+
+### Phase 9C.1 Gateway Contract & Security Remediation
+
+**Status:** REMEDIATED & VERIFIED — Implemented targeted security, contract, crash recovery, and notification remediation for the Phase 9A remote gateway (`src/gateway/`, `src/config/`, `src/notifications/`) addressing all confirmed gaps identified in the Phase 9B audit before WhatsApp integration:
+- **Command Contract:** Implemented safe `/start` onboarding handler returning structured, zero-side-effect greeting and pointer to `/help`; updated `/help` to accurately enumerate currently supported commands; mapped `/deny` as a secure alias for `/reject` without bypassing Trust Core or authorization checks; confirmed `/stop` and `/cancel` equivalence.
+- **Chat Authorization:** Added explicit `allowed_chat_ids: List[int]` configuration field in `TelegramConfig` (`src/config/models.py`) with strict validation (positive integers only, requiring at least one private chat ID when enabled); updated example YAML files (`config/sage.example.yaml`, `config/aegis.example.yaml`). In `ChannelGateway._process_single_update`, enforced dual-gate authorization requiring both sender ID in `allowed_user_ids` and chat ID in `allowed_chat_ids` before command routing, inference, memory access, or task execution; unauthorized senders and chats fail closed without sending diagnostic replies.
+- **Outbound Destination Validation:** Updated `_dispatch_outbound` to strictly reject non-positive integer destinations (Telegram groups/supergroups/channels) and non-allowlisted destinations before transport dispatch, preventing accidental or unauthorized group broadcast.
+- **Safe Crash Recovery:** Implemented `reconcile_startup()` in `ChannelGateway` to reconcile orphaned `PROCESSING` or `QUEUED` inbound updates and unacknowledged `PENDING` outbound records following process crashes. Adheres strictly to the conservative recovery invariant: orphaned updates without completed tasks are marked `FAILED` with recovery required notes and are never automatically replayed; unconfirmed pending outbounds are marked `UNCERTAIN`; reconciliation is deterministic and idempotent.
+- **Telegram Notification Delivery Adapter:** Hardened `TelegramDeliveryAdapter` (`src/notifications/adapters.py`) to reject non-positive chat IDs at initialization and dispatch, catch transport exceptions safely, and redact bot tokens and credentials from error logs and results. Preserved `build_default_adapters()` as `[LocalLogAdapter()]` to avoid unintended background network attempts at startup.
+- **Secret Scrubbing:** Enhanced `HttpTelegramTransport._redact` and `_redact_token` (`src/gateway/transport.py`) to systematically scrub instance bot tokens, generic bot token patterns, and credential-bearing URLs from all logs, errors, and exceptions.
+- **Verification:** Added 7 new comprehensive unit and integration tests (`test_22` through `test_28`) in `tests/test_remote_gateway.py`. All 28 gateway tests and all 16 notification tests pass (44/44 passed).
+
+**Tests:** 44 passed · 0 failed (gateway & notification suites) · 641 passed in full test suite (4 expected environmental exclusions: system python isolation check and 3 uninstalled `llama_cpp` tests).  
+**Deliverables:** `src/gateway/router.py`, `src/gateway/gateway.py`, `src/gateway/transport.py`, `src/gateway/store.py`, `src/config/models.py`, `src/notifications/adapters.py`, `config/sage.example.yaml`, `config/aegis.example.yaml`, `tests/test_remote_gateway.py`.
+
+## [Prompt 033] — 2026-10-18
+
+### Phase 9B Gateway Contract Audit & WhatsApp Adapter Design
+
+**Status:** AUDITED & ARCHITECTURE PLANNED — Conducted a comprehensive security and contract audit of the Phase 9A remote gateway implementation (`src/gateway/`) and designed the architecture for the upcoming WhatsApp channel integration (`docs/PHASE_9B_GATEWAY_AUDIT.md`, `docs/PHASE_9B_WHATSAPP_ARCHITECTURE.md`). Verified actual code implementation against documented claims: identified documentation-to-code gaps (HMAC claim in Prompt 032 was inaccurate as code uses standard TLS token authentication; long-polling only with no webhooks; command set in code implements `/help, /status, /tasks, /inspect, /verify, /diagnose, /task, /confirm, /cancel, /stop, /approve, /reject` while `/start` currently returns error; `TelegramDeliveryAdapter` lacks automated tests). Established the channel-neutral message contract and designed the personal-use, local-first Baileys adapter architecture (`@whiskeysockets/baileys@6.7.22` with mandatory CVE-2026-48063 mitigations, isolated `%USERPROFILE%\.aegis\channels\whatsapp\session\` path with user ACLs, exact-content outbound human approval binding, inbound/outbound group chat blocking, contact allowlists, presence states `AVAILABLE, BUSY, DND, OFF`, and 8-phase implementation plan for Phase 9C). Documentation-only deliverable; zero application source modifications.  
+**Tests:** 638 passed · 0 failed · 0 skipped (100% offline inside SAGE venv)  
+**Deliverables:** `docs/PHASE_9B_GATEWAY_AUDIT.md`, `docs/PHASE_9B_WHATSAPP_ARCHITECTURE.md`
+
+## [Prompt 032] — 2026-10-18
+
+### Secure Remote-Control Gateway (Telegram-First, Phase 9A)
+
+**Status:** IMPLEMENTED & VERIFIED — Implemented the first secure remote-control gateway channel for SAGE (`src/gateway/`), establishing a hardened, Telegram-first entry point into SAGE's existing Supervisor, task execution, skill, memory, notification, and Trust Core architecture without compromising the local-first, zero-secret security perimeter. Designed with multi-layered perimeter defense: constant-time HMAC token validation, strict sender ID and chat ID allowlisting, persistent SQL-backed replay attack deduplication (`migrations/0009_channel_gateway_schema.sql`), sliding-window per-user rate limiting, content sanitization and zero-secret scrubbing. Implemented a deterministic `CommandRouter` supporting 10 safe remote commands (`/start`, `/help`, `/status`, `/briefing`, `/approve`, `/deny`, `/task`, `/cancel`, `/pause`, `/resume`) that strictly respects Autonomy Tiers, fails closed on unknown or unapproved operations, and delegates execution directly to SAGE's `Supervisor` and `ApprovalStore` rather than spawning a separate agent. Added `TelegramNotificationAdapter` for real-time remote delivery of advisory alerts and pending approvals.  
+**Tests:** 638 passed · 0 failed · 0 skipped (100% offline inside SAGE venv, ~75.2s) — 21 new tests in `tests/test_remote_gateway.py`  
+**Lint:** `ruff check src/ tests/` — 0 errors · `ruff format --check src/ tests/` — clean  
+**Type Check:** `mypy src/gateway/ src/config/ src/notifications/ --ignore-missing-imports` — 0 issues  
+
+#### A. Perimeter Security & Hardening (`src/gateway/rate_limiter.py`, `src/gateway/store.py`, `src/gateway/gateway.py`)
+- Identity Verification & Allowlisting: Numeric Telegram user ID (`allowed_user_ids`) and chat ID (`allowed_chat_ids`) verified against configuration; username spoofing neutralized by ignoring user-provided string aliases.
+- Group & Channel Isolation: Strictly rejects updates originating from group chats, supergroups, or public channels before any parsing or inference.
+- Replay Protection & Deduplication: Two-tier deduplication (in-memory LRU cache + SQLite `gateway_updates` table) preventing duplicated update execution across process restarts or network retries.
+- Rate Limiting: `SlidingWindowRateLimiter` enforces strict requests-per-minute limits per user with burst thresholds; excessive requests fail safely with bounded rate-limit warnings.
+- Zero-Secret Invariant & Sanitization: Bot tokens, API keys, credentials, and private paths scrubbed from logging, audit trails, and responses via `_check_no_secrets()`.
+
+#### B. Command Router & Supervisor Integration (`src/gateway/router.py`)
+- 10 Safe Commands: `/start`, `/help`, `/status`, `/briefing`, `/approve`, `/deny`, `/task`, `/cancel`, `/pause`, `/resume`.
+- Trust Core & Approval Integration: `/approve` and `/deny` operate directly on `ApprovalStore` pending requests with fail-closed validation; unauthorized or mismatched requests cannot alter approval states.
+- Task Submission & Persistent Execution: `/task` routes user goals through SAGE's `Supervisor` and persistent completion mode; arbitrary shell execution and direct filesystem paths are prohibited.
+- Safe Error Handling: Unknown commands, malformed parameters, and unhandled errors produce structured, friendly responses without leaking stack traces or internal secrets.
+
+#### C. Transport & Notification Adapter (`src/gateway/transport.py`, `src/gateway/telegram.py`, `src/notifications/adapters.py`)
+- Decoupled Transport Layer: `TelegramTransport` protocol with `MockTelegramTransport` for 100% offline testing and `TelegramBotTransport` for production polling/webhook interaction.
+- Outbound Delivery Queue: `gateway_outbound_messages` records outbound delivery status (`QUEUED`, `SENT`, `FAILED`) with delivery attempt counts and retry safety.
+- `TelegramNotificationAdapter`: Bridges SAGE's `NotificationManager` to Telegram, allowing advisory alerts (P0-P4) and approval requests to reach the user remotely while strictly maintaining the advisory-only invariant.
+
+#### D. Schema Migration & Configuration (`migrations/0009_channel_gateway_schema.sql`, `src/config/models.py`)
+- `0009_channel_gateway_schema.sql`: Staged migration creating `gateway_updates` (deduplication & lifecycle tracking) and `gateway_outbound_messages` (delivery audit) tables.
+- `TelegramConfig`: Added Pydantic schema in `src/config/models.py` with validation for `bot_token`, `allowed_user_ids`, `allowed_chat_ids`, `rate_limit_rpm`, and polling intervals.
+- Example configs updated: `config/aegis.example.yaml` and `config/sage.example.yaml`.
+
 ## [Prompt 031] — 2026-10-10
 
 ### First-Party Skills & End-to-End SAGE Demonstration
