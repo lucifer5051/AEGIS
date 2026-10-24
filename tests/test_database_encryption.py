@@ -1217,19 +1217,24 @@ def test_27_concurrent_write_detected_before_swap_aborts(temp_dir: Path):
 
     from src.security import database_key_rotation
 
-    orig_collect = database_key_rotation._collect_table_counts
+    orig_collect = database_key_rotation._collect_database_parity
     call_count = [0]
 
     def patched_collect(target_path, key):
         res = orig_collect(target_path, key)
         call_count[0] += 1
-        # The 3rd call is the pre-swap parity check on the active DB
+        # The 3rd call is the pre-swap parity check on the active DB.
+        # Simulate a rogue write slipping in by mutating the counter table's
+        # parity value.  _collect_database_parity returns Dict[str, str]
+        # (SHA-256 format "count:hexhash"), so we tamper with the numeric prefix.
         if call_count[0] == 3:
-            # Simulate a rogue write slipping in
-            return {**res, "counter": res.get("counter", 0) + 1}
+            original_parity = res.get("counter", "0:0000")
+            count_part, hash_part = original_parity.split(":", 1)
+            tampered_count = int(count_part) + 1
+            return {**res, "counter": f"{tampered_count}:{hash_part}"}
         return res
 
-    with patch("src.security.database_key_rotation._collect_table_counts", side_effect=patched_collect):
+    with patch("src.security.database_key_rotation._collect_database_parity", side_effect=patched_collect):
         with pytest.raises(RotationError, match="Active database modified during rotation export"):
             rotate_database_key(db_path, key_manager=key_mgr, new_key=key2)
 
@@ -1596,9 +1601,9 @@ def test_34_store_writes_gated_during_drain(temp_dir: Path):
     not SQLCIPHER_AVAILABLE, reason="sqlcipher3 is required for database encryption tests"
 )
 def test_35_parity_detects_row_content_mutation_without_count_change(temp_dir: Path):
-    """SEC-044-06: _collect_table_counts detects content mutation (UPDATE) even if row count is identical."""
+    """SEC-044-06: _collect_database_parity detects content mutation (UPDATE) even if row count is identical."""
     import sqlcipher3
-    from src.security.database_key_rotation import _collect_table_counts
+    from src.security.database_key_rotation import _collect_table_counts as _collect_database_parity
 
     key = b"m" * 32
     db_path = temp_dir / "data" / "sec06.db"
@@ -1611,7 +1616,7 @@ def test_35_parity_detects_row_content_mutation_without_count_change(temp_dir: P
     conn.commit()
     conn.close()
 
-    baseline = _collect_table_counts(db_path, key)
+    baseline = _collect_database_parity(db_path, key)
 
     # Mutate data in place: row count remains 1, but content changes
     conn2 = sqlcipher3.connect(str(db_path))
@@ -1620,7 +1625,7 @@ def test_35_parity_detects_row_content_mutation_without_count_change(temp_dir: P
     conn2.commit()
     conn2.close()
 
-    mutated = _collect_table_counts(db_path, key)
+    mutated = _collect_database_parity(db_path, key)
     assert baseline != mutated, "Parity check failed to detect row content modification"
 
 
@@ -1698,5 +1703,453 @@ def test_37_real_subprocess_drain_coordination(temp_dir: Path):
     assert proc.returncode == 42, f"Subprocess exited {proc.returncode}, stdout: {proc.stdout}, stderr: {proc.stderr}"
 
 
+# ============================================================================
+# Tests 38–45: Genuine Multi-Process OS Concurrency Scenarios (Prompt 047)
+# ============================================================================
 
+@pytest.mark.skipif(
+    not SQLCIPHER_AVAILABLE, reason="sqlcipher3 is required for database encryption tests"
+)
+def test_38_writer_process_blocked_by_drain(temp_dir: Path):
+    """P047-01: A writer subprocess cannot INSERT while drain is active in the parent process.
+
+    Scenario: Parent drains the database; child process attempts create_connection + INSERT.
+    Expected: Child is blocked at create_connection (DatabaseDrainingError, exit 42).
+    """
+    key_file = temp_dir / "keys" / "t38.key.enc"
+    protector = SoftwareKeyProtector(b"3" * 32)
+    key_mgr = DatabaseKeyManager(key_path=key_file, key_protector=protector)
+    key = key_mgr.get_or_create_key()
+
+    db_path = temp_dir / "data" / "t38.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = create_connection(db_path, encryption_key=key, encrypted=True)
+    conn.execute("CREATE TABLE logs (msg TEXT);")
+    conn.commit()
+    conn.close()
+
+    # Parent sets drain so that cross-process writers see it via the drain file
+    ConnectionCoordinator.set_drain(db_path, timeout_sec=5.0)
+
+    worker_script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from src.storage.database import create_connection\n"
+        "from src.storage.errors import DatabaseDrainingError\n"
+        f"db_path = Path({repr(str(db_path))})\n"
+        f"key = bytes.fromhex({repr(key.hex())})\n"
+        "try:\n"
+        "    conn = create_connection(db_path, encryption_key=key, encrypted=True, drain_wait_timeout=0.2)\n"
+        "    conn.execute(\"INSERT INTO logs VALUES ('injected');\")\n"
+        "    conn.close()\n"
+        "    sys.exit(0)\n"
+        "except DatabaseDrainingError:\n"
+        "    sys.exit(42)\n"
+        "except Exception as exc:\n"
+        "    print('unexpected:', exc, file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+    )
+    repo_root = Path(__file__).resolve().parent.parent
+    proc = subprocess.run(
+        [sys.executable, "-c", worker_script],
+        capture_output=True, text=True, timeout=10, cwd=str(repo_root),
+    )
+    ConnectionCoordinator.release_drain(db_path)
+    assert proc.returncode == 42, (
+        f"Writer subprocess should have been blocked (exit 42), got {proc.returncode}. "
+        f"stderr: {proc.stderr}"
+    )
+
+
+@pytest.mark.skipif(
+    not SQLCIPHER_AVAILABLE, reason="sqlcipher3 is required for database encryption tests"
+)
+def test_39_new_connection_waits_for_drain_then_connects(temp_dir: Path):
+    """P047-02: A subprocess blocked by drain can reconnect after drain is released.
+
+    Scenario: Parent drains; child times out (exit 42). Parent releases; child retries and succeeds.
+    """
+    key_file = temp_dir / "keys" / "t39.key.enc"
+    protector = SoftwareKeyProtector(b"9" * 32)
+    key_mgr = DatabaseKeyManager(key_path=key_file, key_protector=protector)
+    key = key_mgr.get_or_create_key()
+
+    db_path = temp_dir / "data" / "t39.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = create_connection(db_path, encryption_key=key, encrypted=True)
+    conn.execute("CREATE TABLE state (v INT);")
+    conn.execute("INSERT INTO state VALUES (1);")
+    conn.commit()
+    conn.close()
+
+    ConnectionCoordinator.set_drain(db_path, timeout_sec=5.0)
+
+    blocked_script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from src.storage.database import create_connection\n"
+        "from src.storage.errors import DatabaseDrainingError\n"
+        f"db_path = Path({repr(str(db_path))})\n"
+        f"key = bytes.fromhex({repr(key.hex())})\n"
+        "try:\n"
+        "    conn = create_connection(db_path, encryption_key=key, encrypted=True, drain_wait_timeout=0.1)\n"
+        "    conn.close()\n"
+        "    sys.exit(0)\n"
+        "except DatabaseDrainingError:\n"
+        "    sys.exit(42)\n"
+    )
+    repo_root = Path(__file__).resolve().parent.parent
+    proc1 = subprocess.run(
+        [sys.executable, "-c", blocked_script],
+        capture_output=True, text=True, timeout=10, cwd=str(repo_root),
+    )
+    assert proc1.returncode == 42, f"First attempt (during drain) should fail: {proc1.stderr}"
+
+    ConnectionCoordinator.release_drain(db_path)
+
+    success_script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from src.storage.database import create_connection\n"
+        f"db_path = Path({repr(str(db_path))})\n"
+        f"key = bytes.fromhex({repr(key.hex())})\n"
+        "try:\n"
+        "    conn = create_connection(db_path, encryption_key=key, encrypted=True)\n"
+        "    row = conn.execute('SELECT v FROM state;').fetchone()\n"
+        "    conn.close()\n"
+        "    sys.exit(0 if row and row[0] == 1 else 2)\n"
+        "except Exception as exc:\n"
+        "    print('error:', exc, file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+    )
+    proc2 = subprocess.run(
+        [sys.executable, "-c", success_script],
+        capture_output=True, text=True, timeout=10, cwd=str(repo_root),
+    )
+    assert proc2.returncode == 0, (
+        f"Second attempt (after drain release) should succeed: {proc2.stderr}"
+    )
+
+
+@pytest.mark.skipif(
+    not SQLCIPHER_AVAILABLE, reason="sqlcipher3 is required for database encryption tests"
+)
+def test_40_concurrent_rotation_mutual_exclusion(temp_dir: Path):
+    """P047-03: Two concurrent rotation attempts — only one proceeds; the other fails with RotationLockError.
+
+    Scenario: Parent holds ExclusiveDatabaseLock; subprocess attempts rotate_database_key.
+    Expected: Subprocess exits with RotationLockError (exit 43).
+    """
+    key_file = temp_dir / "keys" / "t40.key.enc"
+    protector = SoftwareKeyProtector(b"4" * 32)
+    key_mgr = DatabaseKeyManager(key_path=key_file, key_protector=protector)
+    key = key_mgr.get_or_create_key()
+
+    db_path = temp_dir / "data" / "t40.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = create_connection(db_path, encryption_key=key, encrypted=True)
+    conn.execute("CREATE TABLE data (id INT);")
+    conn.execute("INSERT INTO data VALUES (1);")
+    conn.commit()
+    conn.close()
+
+    contender_script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from src.security.database_key_rotation import rotate_database_key, RotationLockError\n"
+        "from src.security.dpapi import SoftwareKeyProtector\n"
+        "from src.security.database_key import DatabaseKeyManager\n"
+        f"key_file = Path({repr(str(key_file))})\n"
+        f"db_path = Path({repr(str(db_path))})\n"
+        "protector = SoftwareKeyProtector(b'4' * 32)\n"
+        "key_mgr = DatabaseKeyManager(key_path=key_file, key_protector=protector)\n"
+        "new_key = b'\\xff' * 32\n"
+        "try:\n"
+        "    rotate_database_key(db_path, key_manager=key_mgr, new_key=new_key, timeout_sec=0.5)\n"
+        "    sys.exit(0)\n"
+        "except RotationLockError:\n"
+        "    sys.exit(43)\n"
+        "except Exception as exc:\n"
+        "    print('unexpected:', exc, file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+    )
+    repo_root = Path(__file__).resolve().parent.parent
+
+    with ExclusiveDatabaseLock(db_path, timeout_sec=5.0):
+        proc = subprocess.run(
+            [sys.executable, "-c", contender_script],
+            capture_output=True, text=True, timeout=10, cwd=str(repo_root),
+        )
+
+    assert proc.returncode == 43, (
+        f"Concurrent rotation should fail with RotationLockError (exit 43), "
+        f"got {proc.returncode}. stderr: {proc.stderr}"
+    )
+
+
+@pytest.mark.skipif(
+    not SQLCIPHER_AVAILABLE, reason="sqlcipher3 is required for database encryption tests"
+)
+def test_41_parity_detects_schema_ddl_mutation(temp_dir: Path):
+    """P047-04: _collect_database_parity detects schema mutations (CREATE INDEX, ALTER TABLE).
+
+    Verifies __schema_hash__ changes when DDL is executed between baseline and re-check.
+    """
+    from src.security.database_key_rotation import _collect_database_parity
+    import sqlcipher3 as _sc3
+
+    key = b"s" * 32
+    db_path = temp_dir / "data" / "t41.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = _sc3.connect(str(db_path))
+    conn.execute(f"PRAGMA key = \"x'{key.hex()}'\";")
+    conn.execute("CREATE TABLE items (id INT PRIMARY KEY, name TEXT);")
+    conn.execute("INSERT INTO items VALUES (1, 'widget');")
+    conn.commit()
+    conn.close()
+
+    baseline = _collect_database_parity(db_path, key)
+
+    # Create index — schema mutation
+    conn2 = _sc3.connect(str(db_path))
+    conn2.execute(f"PRAGMA key = \"x'{key.hex()}'\";")
+    conn2.execute("CREATE INDEX idx_name ON items(name);")
+    conn2.commit()
+    conn2.close()
+
+    after_index = _collect_database_parity(db_path, key)
+    assert baseline["__schema_hash__"] != after_index["__schema_hash__"], (
+        "Schema hash must differ after CREATE INDEX"
+    )
+
+    # Alter table — another schema mutation
+    conn3 = _sc3.connect(str(db_path))
+    conn3.execute(f"PRAGMA key = \"x'{key.hex()}'\";")
+    conn3.execute("ALTER TABLE items ADD COLUMN price REAL DEFAULT 0.0;")
+    conn3.commit()
+    conn3.close()
+
+    after_alter = _collect_database_parity(db_path, key)
+    assert after_index["__schema_hash__"] != after_alter["__schema_hash__"], (
+        "Schema hash must differ after ALTER TABLE ADD COLUMN"
+    )
+
+
+@pytest.mark.skipif(
+    not SQLCIPHER_AVAILABLE, reason="sqlcipher3 is required for database encryption tests"
+)
+def test_42_parity_stable_across_sqlcipher_export(temp_dir: Path):
+    """P047-05: _collect_database_parity is identical between original and sqlcipher_export copy.
+
+    Confirms parity comparison in rotate_database_key won't false-positive on faithful export.
+    """
+    from src.security.database_key_rotation import _collect_database_parity
+    import sqlcipher3 as _sc3
+
+    key1 = b"x" * 32
+    key2 = b"y" * 32
+    db_path = temp_dir / "data" / "t42_src.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path2 = temp_dir / "data" / "t42_exported.db"
+
+    conn = _sc3.connect(str(db_path))
+    conn.execute(f"PRAGMA key = \"x'{key1.hex()}'\";")
+    conn.execute("CREATE TABLE events (id INT, ts TEXT, payload BLOB);")
+    conn.execute("INSERT INTO events VALUES (1, '2026-01-01', NULL);")
+    conn.execute("INSERT INTO events VALUES (2, '2026-01-02', x'deadbeef');")
+    conn.commit()
+    conn.close()
+
+    baseline = _collect_database_parity(db_path, key1)
+
+    c = _sc3.connect(str(db_path))
+    c.execute(f"PRAGMA key = \"x'{key1.hex()}'\";")
+    c.execute(f"ATTACH DATABASE '{db_path2}' AS staged KEY \"x'{key2.hex()}'\";")
+    c.execute("SELECT sqlcipher_export('staged');")
+    c.execute("DETACH DATABASE staged;")
+    c.close()
+
+    exported = _collect_database_parity(db_path2, key2)
+    assert baseline == exported, (
+        f"Parity must be identical after faithful sqlcipher_export.\n"
+        f"Baseline: {baseline}\nExported: {exported}"
+    )
+
+
+@pytest.mark.skipif(
+    not SQLCIPHER_AVAILABLE, reason="sqlcipher3 is required for database encryption tests"
+)
+def test_43_coordinated_connection_blocks_writes_during_drain(temp_dir: Path):
+    """P047-06: CoordinatedConnection/CoordinatedCursor block all write SQL in-process while draining.
+
+    Verifies the universal write-gate injected by factory= in create_connection().
+    """
+    from src.storage.errors import DatabaseDrainingError
+
+    key_file = temp_dir / "keys" / "t43.key.enc"
+    protector = SoftwareKeyProtector(b"6" * 32)
+    key_mgr = DatabaseKeyManager(key_path=key_file, key_protector=protector)
+    key = key_mgr.get_or_create_key()
+
+    db_path = temp_dir / "data" / "t43.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = create_connection(db_path, encryption_key=key, encrypted=True)
+    conn.execute("CREATE TABLE notes (content TEXT);")
+    conn.execute("INSERT INTO notes VALUES ('initial');")
+    conn.commit()
+
+    ConnectionCoordinator.set_drain(db_path, timeout_sec=5.0)
+
+    try:
+        # Reads must pass through
+        rows = conn.execute("SELECT content FROM notes;").fetchall()
+        assert len(rows) == 1
+
+        # INSERT blocked
+        with pytest.raises(DatabaseDrainingError):
+            conn.execute("INSERT INTO notes VALUES ('injected');")
+
+        # UPDATE blocked
+        with pytest.raises(DatabaseDrainingError):
+            conn.execute("UPDATE notes SET content = 'hacked';")
+
+        # DELETE blocked
+        with pytest.raises(DatabaseDrainingError):
+            conn.execute("DELETE FROM notes WHERE content = 'initial';")
+
+        # DDL blocked
+        with pytest.raises(DatabaseDrainingError):
+            conn.execute("CREATE TABLE evil (x INT);")
+
+        # transaction() rejected at gate
+        with pytest.raises(DatabaseDrainingError):
+            with transaction(conn):
+                pass
+
+    finally:
+        ConnectionCoordinator.release_drain(db_path)
+        conn.close()
+
+    # After drain released: writes succeed
+    conn2 = create_connection(db_path, encryption_key=key, encrypted=True)
+    conn2.execute("INSERT INTO notes VALUES ('after_drain');")
+    conn2.commit()
+    rows2 = conn2.execute("SELECT content FROM notes;").fetchall()
+    assert len(rows2) == 2
+    conn2.close()
+
+
+@pytest.mark.skipif(
+    not SQLCIPHER_AVAILABLE, reason="sqlcipher3 is required for database encryption tests"
+)
+def test_44_startup_reads_new_key_after_rotation(temp_dir: Path):
+    """P047-07: A subprocess can read the database using the new key after a completed rotation.
+
+    Scenario: Parent rotates database to key2. Subprocess loads key from key manager, connects, reads.
+    Expected: Subprocess exits 0 and reads correct data.
+    """
+    key_file = temp_dir / "keys" / "t44.key.enc"
+    protector = SoftwareKeyProtector(b"7" * 32)
+    key_mgr = DatabaseKeyManager(key_path=key_file, key_protector=protector)
+    key1 = key_mgr.get_or_create_key()
+    key2 = b"\xaa" * 32
+
+    db_path = temp_dir / "data" / "t44.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = create_connection(db_path, encryption_key=key1, encrypted=True)
+    conn.execute("CREATE TABLE settings (k TEXT PRIMARY KEY, v TEXT);")
+    conn.execute("INSERT INTO settings VALUES ('version', '1');")
+    conn.commit()
+    conn.close()
+
+    result = rotate_database_key(db_path, key_manager=key_mgr, new_key=key2)
+    assert result.get("status") == "SUCCESS"
+    assert key_mgr.get_key() == key2
+
+    subprocess_script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from src.storage.database import create_connection\n"
+        "from src.security.dpapi import SoftwareKeyProtector\n"
+        "from src.security.database_key import DatabaseKeyManager\n"
+        f"key_file = Path({repr(str(key_file))})\n"
+        f"db_path = Path({repr(str(db_path))})\n"
+        "protector = SoftwareKeyProtector(b'7' * 32)\n"
+        "key_mgr = DatabaseKeyManager(key_path=key_file, key_protector=protector)\n"
+        "key = key_mgr.get_key()\n"
+        "try:\n"
+        "    conn = create_connection(db_path, encryption_key=key, encrypted=True)\n"
+        "    row = conn.execute(\"SELECT v FROM settings WHERE k='version';\").fetchone()\n"
+        "    conn.close()\n"
+        "    sys.exit(0 if row and row[0] == '1' else 2)\n"
+        "except Exception as exc:\n"
+        "    print('error:', exc, file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+    )
+    repo_root = Path(__file__).resolve().parent.parent
+    proc = subprocess.run(
+        [sys.executable, "-c", subprocess_script],
+        capture_output=True, text=True, timeout=15, cwd=str(repo_root),
+    )
+    assert proc.returncode == 0, (
+        f"Subprocess should read DB with new key successfully. "
+        f"exit={proc.returncode}, stderr={proc.stderr}"
+    )
+
+
+@pytest.mark.skipif(
+    not SQLCIPHER_AVAILABLE, reason="sqlcipher3 is required for database encryption tests"
+)
+def test_45_pre_swap_exclusive_access_check_blocks_open_handle(temp_dir: Path):
+    """P047-08: can_acquire_exclusive_file_access returns False while a Windows handle is open.
+
+    Verifies the pre-swap guard used in Step 7.5 of rotate_database_key on Windows.
+    """
+    import ctypes
+    import sys as _sys
+
+    db_path = temp_dir / "data" / "t45_exclusive.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.write_bytes(b"placeholder")
+
+    assert can_acquire_exclusive_file_access(db_path), (
+        "Should be able to acquire exclusive access when no handles are open"
+    )
+
+    if _sys.platform != "win32":
+        pytest.skip("Windows-specific exclusive handle test skipped on non-Windows")
+
+    kernel32 = ctypes.windll.kernel32
+    GENERIC_READ = 0x80000000
+    GENERIC_WRITE = 0x40000000
+    FILE_SHARE_NONE = 0
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x80
+
+    handle = kernel32.CreateFileW(
+        str(db_path),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_NONE,
+        None,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        None,
+    )
+    assert handle != -1, "Failed to open non-sharing file handle for test"
+    try:
+        assert not can_acquire_exclusive_file_access(db_path), (
+            "Exclusive access must be denied while a non-sharing handle is open (os.replace would fail)"
+        )
+    finally:
+        kernel32.CloseHandle(handle)
+
+    assert can_acquire_exclusive_file_access(db_path), (
+        "Exclusive access must be restored after handle is closed"
+    )
 

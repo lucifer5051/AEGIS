@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -109,6 +110,180 @@ else:
     IntegrityError = (sqlite3.IntegrityError,)  # type: ignore[assignment]
     OperationalError = (sqlite3.OperationalError,)  # type: ignore[assignment]
     DatabaseError = (sqlite3.DatabaseError,)  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# Write-statement detection for drain-gate enforcement (SEC-044-01/02/03 fix)
+# ---------------------------------------------------------------------------
+# Matches any SQL statement that modifies data, schema, or transaction state.
+# READ-only statements (SELECT, PRAGMA without '=', EXPLAIN, COMMIT, ROLLBACK)
+# are not matched so that in-flight reads continue unblocked during drain.
+#
+# Design rationale:
+# - We match on the *first* non-comment keyword so cached prepared statements
+#   cannot bypass the check (unlike set_authorizer, which is bypassed by the
+#   SQLite statement cache for re-used statements).
+# - Positive-match for PRAGMA <name> = or PRAGMA <name>( only — bare PRAGMA
+#   reads are safe and must not be blocked.
+_WRITE_SQL_PATTERN: re.Pattern[str] = re.compile(
+    r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*"
+    r"(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|BEGIN|VACUUM|REINDEX"
+    r"|ATTACH|DETACH|PRAGMA\s+[a-zA-Z0-9_]+\s*(?:=|\())\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _is_write_statement(sql: str) -> bool:
+    """Return True if *sql* is a statement that writes data, schema, or opens a transaction.
+
+    Used by CoordinatedCursor / CoordinatedConnection to enforce the drain gate
+    so that no writes slip through while a key rotation is draining connections.
+    """
+    if not isinstance(sql, str):
+        return False
+    return bool(_WRITE_SQL_PATTERN.match(sql))
+
+
+# ---------------------------------------------------------------------------
+# Coordinated Connection & Cursor classes
+# ---------------------------------------------------------------------------
+# These subclasses intercept every write-capable SQL method and raise
+# DatabaseDrainingError if the database is currently being drained for key
+# rotation.  They are injected via the ``factory=`` parameter of
+# sqlite3.connect / sqlcipher3.connect so that *every* connection returned by
+# create_connection() automatically enforces the drain gate — no per-store
+# patching is required.
+
+
+class CoordinatedCursor(sqlite3.Cursor):
+    """sqlite3.Cursor subclass that blocks write statements while draining."""
+
+    def execute(self, sql: str, parameters: Any = (), /) -> "CoordinatedCursor":
+        if _is_write_statement(sql):
+            db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+            if db_path and ConnectionCoordinator.is_draining(db_path):
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' is draining for key rotation; write rejected."
+                )
+        return super().execute(sql, parameters)
+
+    def executemany(self, sql: str, seq_of_parameters: Any, /) -> "CoordinatedCursor":
+        if _is_write_statement(sql):
+            db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+            if db_path and ConnectionCoordinator.is_draining(db_path):
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' is draining for key rotation; write rejected."
+                )
+        return super().executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script: str, /) -> "CoordinatedCursor":
+        db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+        if db_path and ConnectionCoordinator.is_draining(db_path):
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' is draining for key rotation; script rejected."
+            )
+        return super().executescript(sql_script)
+
+
+class CoordinatedConnection(sqlite3.Connection):
+    """sqlite3.Connection subclass that blocks write statements while draining."""
+
+    def cursor(self, factory: Any = None) -> CoordinatedCursor:
+        return super().cursor(factory or CoordinatedCursor)
+
+    def execute(self, sql: str, parameters: Any = (), /) -> CoordinatedCursor:
+        if _is_write_statement(sql):
+            db_path = ConnectionCoordinator.get_connection_db_path(self)
+            if db_path and ConnectionCoordinator.is_draining(db_path):
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' is draining for key rotation; write rejected."
+                )
+        return super().execute(sql, parameters)
+
+    def executemany(self, sql: str, seq_of_parameters: Any, /) -> CoordinatedCursor:
+        if _is_write_statement(sql):
+            db_path = ConnectionCoordinator.get_connection_db_path(self)
+            if db_path and ConnectionCoordinator.is_draining(db_path):
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' is draining for key rotation; write rejected."
+                )
+        return super().executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script: str, /) -> CoordinatedCursor:
+        db_path = ConnectionCoordinator.get_connection_db_path(self)
+        if db_path and ConnectionCoordinator.is_draining(db_path):
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' is draining for key rotation; script rejected."
+            )
+        return super().executescript(sql_script)
+
+
+if SQLCIPHER_AVAILABLE:
+    class CoordinatedSQLCipherCursor(sqlcipher_dbapi2.Cursor):  # type: ignore[misc]
+        """sqlcipher3.Cursor subclass that blocks write statements while draining."""
+
+        def execute(self, sql: str, parameters: Any = (), /) -> "CoordinatedSQLCipherCursor":
+            if _is_write_statement(sql):
+                db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+                if db_path and ConnectionCoordinator.is_draining(db_path):
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; write rejected."
+                    )
+            return super().execute(sql, parameters)
+
+        def executemany(self, sql: str, seq_of_parameters: Any, /) -> "CoordinatedSQLCipherCursor":
+            if _is_write_statement(sql):
+                db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+                if db_path and ConnectionCoordinator.is_draining(db_path):
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; write rejected."
+                    )
+            return super().executemany(sql, seq_of_parameters)
+
+        def executescript(self, sql_script: str, /) -> "CoordinatedSQLCipherCursor":
+            db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+            if db_path and ConnectionCoordinator.is_draining(db_path):
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' is draining for key rotation; script rejected."
+                )
+            return super().executescript(sql_script)
+
+    class CoordinatedSQLCipherConnection(sqlcipher_dbapi2.Connection):  # type: ignore[misc]
+        """sqlcipher3.Connection subclass that blocks write statements while draining."""
+
+        def cursor(self, factory: Any = None) -> "CoordinatedSQLCipherCursor":
+            return super().cursor(factory or CoordinatedSQLCipherCursor)
+
+        def execute(self, sql: str, parameters: Any = (), /) -> "CoordinatedSQLCipherCursor":
+            if _is_write_statement(sql):
+                db_path = ConnectionCoordinator.get_connection_db_path(self)
+                if db_path and ConnectionCoordinator.is_draining(db_path):
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; write rejected."
+                    )
+            return super().execute(sql, parameters)
+
+        def executemany(self, sql: str, seq_of_parameters: Any, /) -> "CoordinatedSQLCipherCursor":
+            if _is_write_statement(sql):
+                db_path = ConnectionCoordinator.get_connection_db_path(self)
+                if db_path and ConnectionCoordinator.is_draining(db_path):
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; write rejected."
+                    )
+            return super().executemany(sql, seq_of_parameters)
+
+        def executescript(self, sql_script: str, /) -> "CoordinatedSQLCipherCursor":
+            db_path = ConnectionCoordinator.get_connection_db_path(self)
+            if db_path and ConnectionCoordinator.is_draining(db_path):
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' is draining for key rotation; script rejected."
+                )
+            return super().executescript(sql_script)
+else:
+    # Fallback stubs when sqlcipher3 is not available so code that references
+    # these names at import time does not raise NameError.
+    CoordinatedSQLCipherCursor = None  # type: ignore[assignment,misc]
+    CoordinatedSQLCipherConnection = None  # type: ignore[assignment,misc]
 
 
 @dataclass(frozen=True)
@@ -379,7 +554,7 @@ class ConnectionCoordinator:
         }
         # Write to a temp sibling then atomically rename so readers always see
         # either a complete JSON document or the file not yet present.
-        tmp_drain = drain_file.with_suffix(".drain.tmp")
+        tmp_drain = drain_file.with_name(f"{drain_file.name}.{uuid4().hex[:8]}.tmp")
         try:
             tmp_drain.write_text(json.dumps(drain_payload, indent=2), encoding="utf-8")
             os.replace(tmp_drain, drain_file)
@@ -565,6 +740,7 @@ def create_connection(
                 path_str,
                 timeout=timeout_sec,
                 isolation_level=None,
+                factory=CoordinatedSQLCipherConnection if CoordinatedSQLCipherConnection is not None else sqlcipher3.Connection,
             )
             conn.row_factory = sqlcipher3.Row
 
@@ -597,6 +773,7 @@ def create_connection(
                 path_str,
                 timeout=timeout_sec,
                 isolation_level=None,
+                factory=CoordinatedConnection,
             )
             conn.row_factory = sqlite3.Row
         except sqlite3.OperationalError as exc:
@@ -1266,10 +1443,16 @@ def initialize_runtime_database(
             except RotationLockError:
                 # Another process holds the rotation lock and is actively rotating;
                 # skip recovery here — the lock-holder is responsible for completion.
+                # Wait for drain to finish so we don't open with a stale pre-rotation key.
                 logger.info(
-                    "Skipping startup recovery for '%s': rotation lock held by another process.",
+                    "Skipping startup recovery for '%s': rotation lock held by another process. "
+                    "Waiting for drain to complete before connecting.",
                     validated_path,
                 )
+                ConnectionCoordinator.wait_for_drain(validated_path, timeout=15.0)
+                # Reload the key in case rotation completed and committed a new key
+                if encryption_key is None:
+                    active_key = key_mgr.get_key()
 
     # If file exists on disk and is plaintext, migrate it before connecting
     if use_encryption and active_key and not is_memory and validated_path.is_file():

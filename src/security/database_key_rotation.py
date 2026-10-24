@@ -344,7 +344,7 @@ def rotate_database_key(
                         logger.warning("Error closing chk_conn on %s: %s", validated_path, close_exc)
 
             # Collect baseline schema and row counts for parity verification
-            baseline_counts = _collect_table_counts(validated_path, current_key)
+            baseline_counts = _collect_database_parity(validated_path, current_key)
 
             journal_id = uuid4().hex[:8]
             journal.record_state(
@@ -483,7 +483,7 @@ def rotate_database_key(
                             logger.warning("Error closing staged_conn: %s", close_exc)
 
                 # Parity verification
-                staged_counts = _collect_table_counts(staging_db_file, fresh_key)
+                staged_counts = _collect_database_parity(staging_db_file, fresh_key)
                 if staged_counts != baseline_counts:
                     raise RotationError(
                         f"Data parity mismatch between original and staged rekeyed database: "
@@ -505,9 +505,9 @@ def rotate_database_key(
                 raise RotationError(f"Verification of staged re-keyed database failed: {exc}") from exc
 
             # 7.5 Pre-swap verification: ensure no writes slipped in on active database
-            # SEC-044-02 & SEC-044-06: compare counts and row-level XOR-CRC32 checksums
-            # to detect INSERT, DELETE, UPDATE, and trigger mutations.
-            current_counts = _collect_table_counts(validated_path, current_key)
+            # SEC-044-02 & SEC-044-06: compare SHA-256 schema and row-content fingerprints
+            # to detect INSERT, DELETE, UPDATE, DDL, and trigger mutations.
+            current_counts = _collect_database_parity(validated_path, current_key)
             if current_counts != baseline_counts:
                 if staging_db_file.exists():
                     try:
@@ -843,45 +843,76 @@ def _verify_key_rejected(staged_path: Path, old_key: bytes) -> None:
         )
 
 
-def _collect_table_counts(db_path: Path, key: bytes) -> Dict[str, int]:
-    """Collect record counts and an XOR content fingerprint for all user tables.
+def _collect_database_parity(db_path: Path, key: bytes) -> Dict[str, str]:
+    """Collect a deterministic SHA-256 fingerprint for schema and all row content.
 
-    The fingerprint is computed as the XOR of CRC32 values over every row's
-    string representation so that UPDATE, paired DELETE+INSERT, and trigger
-    mutations are detected in addition to plain INSERT/DELETE operations.
-    (SEC-044-06 fix)
+    The parity dictionary contains:
+    - ``__schema_hash__``: SHA-256 of every sqlite_master entry (type, name, tbl_name, sql)
+      ordered deterministically.  This detects DDL changes: CREATE/DROP TABLE, CREATE/DROP
+      INDEX, CREATE/DROP TRIGGER, etc.
+    - one entry per user table mapping ``table_name`` to ``"<row_count>:<SHA-256-of-rows>"``.
+      Rows are serialised with NULL-safe string encoding and ordered by all columns so that
+      UPDATE, paired DELETE+INSERT, and trigger mutations are detected in addition to plain
+      INSERT / DELETE operations.
 
-    Returns a dict mapping table names to (count * (fingerprint | 1)) so that
-    the value is sensitive to both cardinality changes and content changes.
-    A fingerprint of 0 is normalised to 1 to avoid collisions with empty tables.
+    Using SHA-256 rather than XOR-CRC32 eliminates the symmetry cancellation flaw in the
+    previous implementation (two rows with the same CRC XOR to 0, indistinguishable from an
+    empty table).  (SEC-044-06 strength upgrade.)
     """
-    import zlib
+    import hashlib
 
-    counts: Dict[str, int] = {}
+    parity: Dict[str, str] = {}
     conn = sqlcipher3.connect(str(db_path))
     try:
         conn.execute(f"PRAGMA key = \"x'{key.hex()}'\";")
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"
-        )
-        tables = [row[0] for row in cursor.fetchall()]
+
+        # 1. Schema fingerprint — detects DDL mutations
+        schema_rows = conn.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name;"
+        ).fetchall()
+        sh = hashlib.sha256()
+        for r in schema_rows:
+            sh.update(f"{r[0]}|{r[1]}|{r[2]}|{r[3]}\n".encode("utf-8"))
+        parity["__schema_hash__"] = sh.hexdigest()
+
+        # 2. Per-table row content fingerprint
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name;"
+            ).fetchall()
+        ]
         for tbl in sorted(tables):
             c_row = conn.execute(f'SELECT count(*) FROM "{tbl}";').fetchone()
             row_count = c_row[0] if c_row else 0
-            # Compute XOR-CRC32 fingerprint over all row strings
-            fingerprint = 0
-            for data_row in conn.execute(f'SELECT * FROM "{tbl}";').fetchall():
-                row_crc = zlib.crc32(str(tuple(data_row)).encode("utf-8")) & 0xFFFFFFFF
-                fingerprint ^= row_crc
-            # Normalise fingerprint so empty tables aren't confused with zero-fingerprint tables
-            fingerprint = fingerprint if fingerprint != 0 else 1
-            counts[tbl] = row_count * fingerprint
+            rh = hashlib.sha256()
+            # Deterministic column order for row sorting
+            cols = [
+                f'"{col[1]}"'
+                for col in conn.execute(f'PRAGMA table_info("{tbl}");').fetchall()
+            ]
+            order_clause = f"ORDER BY {', '.join(cols)}" if cols else ""
+            for data_row in conn.execute(
+                f'SELECT * FROM "{tbl}" {order_clause};'
+            ).fetchall():
+                rh.update(
+                    ("|".join("" if v is None else str(v) for v in data_row) + "\n").encode(
+                        "utf-8"
+                    )
+                )
+            parity[tbl] = f"{row_count}:{rh.hexdigest()}"
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    return counts
+    return parity
+
+
+# Backward-compatible alias; tests and internal callers may reference either name.
+_collect_table_counts = _collect_database_parity
 
 
 def _rekey_backup_file(backup_path: Path, old_key: bytes, new_key: bytes) -> bool:
