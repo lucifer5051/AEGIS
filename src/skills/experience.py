@@ -141,10 +141,12 @@ class ExperienceFeedbackService:
         conn: Optional[sqlite3.Connection] = None,
         memory_store: Optional[Any] = None,
         max_retention: int = DEFAULT_RETENTION_LIMIT,
+        unified_memory: Optional[Any] = None,
     ) -> None:
         self._conn = conn
         self._memory_store = memory_store
         self._max_retention = max_retention
+        self._unified_memory = unified_memory
         self._events: List[ExperienceEvent] = []
         self._feedback_records: Dict[str, Dict[str, Any]] = {}
         if self._conn is not None:
@@ -264,10 +266,34 @@ class ExperienceFeedbackService:
                     ),
                 )
                 self._prune_retention()
+                self._conn.commit()
             except sqlite3.OperationalError as exc:
                 logger.warning("Durable event persistence error: %s", exc)
 
-        # 4. In-memory append
+        # 4. Record to Unified Memory if configured
+        if self._unified_memory is not None:
+            try:
+                is_success = persisted_event.outcome_type.value in (
+                    "VERIFIED_SUCCESS",
+                    "SUCCESS",
+                )
+                self._unified_memory.record_task_outcome(
+                    task_id=persisted_event.task_id,
+                    intent=persisted_event.intent,
+                    success=is_success,
+                    details=(
+                        f"Skill: {persisted_event.skill_id}; "
+                        f"Outcome: {persisted_event.outcome_type.value}; "
+                        f"Tools: {list(persisted_event.selected_tools)}"
+                    ),
+                    error=persisted_event.error_or_recovery_info,
+                    project_id=persisted_event.project_id,
+                    actor=f"skill:{persisted_event.skill_id}",
+                )
+            except Exception as exc:
+                logger.debug("Unified memory recording failed non-blockingly: %s", exc)
+
+        # 5. In-memory append
         self._events.append(persisted_event)
         logger.debug(
             "Recorded ExperienceEvent for skill '%s' (invocation=%s, outcome=%s)",
