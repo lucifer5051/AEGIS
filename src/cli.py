@@ -94,91 +94,39 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("SAGE CLI starting for goal: %r", args.goal)
 
-    # === Initialize Database ===
+    # === Initialize Central Application Runtime ===
     db_path = Path(args.db_path) if args.db_path else _get_runtime_db_path()
     migrations_dir = _get_migrations_dir()
 
+    tier_map = {
+        0: "STRICT_MANUAL",
+        1: "SAFE_BOUNDED",
+        2: "SUPERVISED",
+        3: "FULL_BOUNDED",
+    }
+    tier_name = tier_map.get(args.autonomy_tier, "STRICT_MANUAL")
+
     try:
-        from src.storage.database import initialize_runtime_database
+        from src.runtime import SageApplication
 
-        conn = initialize_runtime_database(db_path, migrations_dir=migrations_dir)
-    except Exception as exc:
-        print(f"[SAGE ERROR] Failed to initialize database: {exc}", file=sys.stderr)
-        logger.exception("Database initialization failed")
-        return 1
-
-    # === Build Trust Authority ===
-    try:
-        from src.trust import build_trust_authority
-        from src.trust.policy import AutonomyTier
-
-        tier_map = {
-            0: AutonomyTier.STRICT_MANUAL,
-            1: AutonomyTier.SAFE_BOUNDED,
-            2: AutonomyTier.SUPERVISED,
-            3: AutonomyTier.FULL_BOUNDED,
-        }
-        tier = tier_map.get(args.autonomy_tier, AutonomyTier.STRICT_MANUAL)
-        trust_authority = build_trust_authority(conn, autonomy_tier=tier)
-    except Exception as exc:
-        print(f"[SAGE ERROR] Failed to build Trust Authority: {exc}", file=sys.stderr)
-        return 1
-
-    # === Build Tool Broker with Builtins ===
-    try:
-        from src.tools.broker import ToolBroker
-        from src.tools.builtin import register_builtin_tools
-
-        broker = ToolBroker(trust_authority)
-        register_builtin_tools(broker)
-    except Exception as exc:
-        print(f"[SAGE ERROR] Failed to register tools: {exc}", file=sys.stderr)
-        return 1
-
-    # === Load Reasoning Provider (optional) ===
-    reasoning_provider = None
-    if not args.no_llm:
-        try:
-            from src.reasoning.provider import LlamaCppReasoningProvider
-
-            reasoning_provider = LlamaCppReasoningProvider()
-            reasoning_provider.initialize()
-            logger.info("Local reasoning provider initialized successfully.")
-        except Exception as exc:
-            print(
-                f"[SAGE WARNING] Local reasoning provider not available: {exc}\n"
-                "Run with --no-llm to suppress this warning.",
-                file=sys.stderr,
-            )
-            reasoning_provider = None
-
-    # === Build State Store & Supervisor ===
-    try:
-        from src.manager.state_store import StateStore
-        from src.manager.supervisor import Supervisor
-
-        state_store = StateStore(conn)
-        supervisor = Supervisor(
-            state_store=state_store,
-            trust_authority=trust_authority,
-            tool_broker=broker,
-            reasoning_provider=reasoning_provider,
+        app = SageApplication(
+            db_path=db_path,
+            migrations_dir=migrations_dir,
         )
-    except Exception as exc:
-        print(f"[SAGE ERROR] Failed to build Supervisor: {exc}", file=sys.stderr)
-        return 1
-
-    # === Execute Goal ===
-    if reasoning_provider is None:
-        print(
-            "[SAGE] No reasoning provider loaded. Cannot plan goal.\n"
-            "Ensure the local model is present or check the logs.",
-            file=sys.stderr,
+        # Update autonomy profile tier if explicitly requested
+        app.config_manager.update_config(
+            updates={"autonomy_profile": {"tier": tier_name}},
+            actor="cli_user",
         )
+        app.start()
+    except Exception as exc:
+        print(f"[SAGE ERROR] Failed to initialize SAGE runtime: {exc}", file=sys.stderr)
+        logger.exception("Runtime initialization failed")
         return 1
 
     try:
-        result = supervisor.execute_goal(
+        # === Execute Goal ===
+        result = app.supervisor.execute_goal(
             goal_text=args.goal,
             actor="cli_user",
             project_id=args.project_id,
@@ -186,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"[SAGE ERROR] Execution failed unexpectedly: {exc}", file=sys.stderr)
         logger.exception("execute_goal raised an unhandled exception")
+        app.stop()
         return 1
 
     # === Output Result ===
@@ -196,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     if result.task_record:
         print(f"\n[Task ID: {result.task_record.task_id}]")
 
+    app.stop()
     return 0 if result.success else 1
 
 

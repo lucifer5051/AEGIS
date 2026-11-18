@@ -121,6 +121,12 @@ _ACTION_RISK_TABLE: Dict[str, ActionRisk] = {
     "decision.evaluate": ActionRisk.LOW,
     # Audit (read-only access to audit log)
     "audit.read": ActionRisk.LOW,
+    # Desktop automation (restricted Windows MCP integration)
+    "desktop.read": ActionRisk.LOW,
+    "desktop.inspect": ActionRisk.LOW,
+    "desktop.interact": ActionRisk.MEDIUM,
+    "desktop.launch": ActionRisk.HIGH,
+    "desktop.admin": ActionRisk.CRITICAL,
 }
 
 # Tier → maximum autonomous (non-escalated) risk level

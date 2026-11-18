@@ -26,6 +26,7 @@ from src.manager.errors import (
     SessionNotFoundError,
     StateStoreError,
     StepNotFoundError,
+    TaskHierarchyError,
     TaskNotFoundError,
     TaskStateError,
 )
@@ -73,6 +74,9 @@ def _sanitize_and_validate_text(text: Optional[str]) -> Optional[str]:
     sanitized = sanitize_output(text)
     _check_no_secrets(sanitized)
     return sanitized
+
+
+MAX_HIERARCHY_DEPTH: int = 16
 
 
 class StateStore:
@@ -193,21 +197,64 @@ class StateStore:
         routing_intent: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         execution_mode: Optional[Any] = None,
+        parent_task_id: Optional[str] = None,
+        root_task_id: Optional[str] = None,
     ) -> TaskRecord:
-        """Create a new task in SUBMITTED state.
+        """Create a new task in SUBMITTED state with optional hierarchy linking.
 
         Raises:
+            TaskHierarchyError: If hierarchy constraints (cycles, max depth) are violated.
+            TaskNotFoundError: If parent_task_id is provided but does not exist.
             SecretLeakError: If secret pattern detected in title or metadata.
             StateStoreError: On database error.
         """
         tid = task_id or str(uuid4())
         clean_title = _sanitize_and_validate_text(title) or ""
+
+        # Hierarchy validation and lineage resolution
+        resolved_root_id = root_task_id
+        if parent_task_id is not None:
+            if parent_task_id == tid:
+                raise TaskHierarchyError(f"Task '{tid}' cannot be its own parent.")
+            parent_task = self.get_task(parent_task_id)
+            if parent_task is None:
+                raise TaskNotFoundError(f"Parent task '{parent_task_id}' not found.")
+
+            # Cycle detection and max depth check
+            curr: Optional[TaskRecord] = parent_task
+            depth = 1
+            while curr is not None:
+                if curr.task_id == tid or curr.parent_task_id == tid:
+                    raise TaskHierarchyError(
+                        f"Circular parent reference detected: task '{tid}' is already an ancestor of '{parent_task_id}'."
+                    )
+                if depth >= MAX_HIERARCHY_DEPTH:
+                    raise TaskHierarchyError(
+                        f"Task hierarchy depth exceeds maximum allowed limit {MAX_HIERARCHY_DEPTH}."
+                    )
+                if curr.parent_task_id and curr.parent_task_id != curr.task_id:
+                    curr = self.get_task(curr.parent_task_id)
+                    depth += 1
+                else:
+                    break
+
+            if resolved_root_id is None:
+                resolved_root_id = parent_task.root_task_id or parent_task.task_id
+        else:
+            if resolved_root_id is None:
+                resolved_root_id = tid
+
         meta = dict(metadata or {})
         if execution_mode is not None:
             mode_str = (
                 execution_mode.value if hasattr(execution_mode, "value") else str(execution_mode)
             )
             meta["execution_mode"] = mode_str
+        if parent_task_id is not None:
+            meta["parent_task_id"] = parent_task_id
+        if resolved_root_id is not None:
+            meta["root_task_id"] = resolved_root_id
+
         meta_json = _sanitize_and_validate_json(meta)
         now = _now_utc()
 
@@ -250,6 +297,8 @@ class StateStore:
             created_at=now,
             updated_at=now,
             metadata=meta,
+            parent_task_id=parent_task_id,
+            root_task_id=resolved_root_id,
         )
 
     def update_task_metadata(
@@ -715,8 +764,12 @@ class StateStore:
         snapshot: Dict[str, Any],
         step_id: Optional[str] = None,
         checkpoint_id: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+        root_task_id: Optional[str] = None,
+        execution_id: Optional[str] = None,
+        parent_execution_id: Optional[str] = None,
     ) -> CheckpointSnapshot:
-        """Persist an idempotent checkpoint snapshot.
+        """Persist an idempotent checkpoint snapshot with optional hierarchy linking.
 
         Raises:
             SecretLeakError: If secrets are detected in snapshot.
@@ -724,7 +777,30 @@ class StateStore:
         """
         cid = checkpoint_id or str(uuid4())
         now = _now_utc()
-        snap_json = _sanitize_and_validate_json(snapshot)
+
+        # Resolve hierarchy linkage if not explicitly passed
+        eff_parent_id = parent_task_id
+        eff_root_id = root_task_id
+        if eff_parent_id is None or eff_root_id is None:
+            task = self.get_task(task_id)
+            if task:
+                if eff_parent_id is None:
+                    eff_parent_id = task.parent_task_id
+                if eff_root_id is None:
+                    eff_root_id = task.root_task_id or task.task_id
+            else:
+                if eff_root_id is None:
+                    eff_root_id = task_id
+
+        snap_copy = dict(snapshot)
+        snap_copy["_hierarchy"] = {
+            "task_id": task_id,
+            "parent_task_id": eff_parent_id,
+            "root_task_id": eff_root_id or task_id,
+            "execution_id": execution_id,
+            "parent_execution_id": parent_execution_id,
+        }
+        snap_json = _sanitize_and_validate_json(snap_copy)
 
         try:
             with transaction(self._conn, immediate=True) as cur:
@@ -750,8 +826,12 @@ class StateStore:
             task_id=task_id,
             step_id=step_id,
             checkpoint_seq=checkpoint_seq,
-            snapshot=snapshot,
+            snapshot=dict(snapshot),
             created_at=now,
+            parent_task_id=eff_parent_id,
+            root_task_id=eff_root_id or task_id,
+            execution_id=execution_id,
+            parent_execution_id=parent_execution_id,
         )
 
     def get_latest_checkpoint(self, task_id: str) -> Optional[CheckpointSnapshot]:
@@ -801,3 +881,123 @@ class StateStore:
             )
             for r in rows
         ]
+
+    # ==========================================================================
+    # HIERARCHY & LINEAGE TRAVERSAL
+    # ==========================================================================
+
+    def get_child_tasks(self, parent_task_id: str) -> List[TaskRecord]:
+        """Fetch all direct child tasks spawned under a given parent task."""
+        cursor = self._conn.execute(
+            """
+            SELECT task_id, session_id, project_id, title, state, priority,
+                   routing_intent, created_at, updated_at, completed_at,
+                   error_summary, metadata_json
+            FROM tasks
+            WHERE json_extract(metadata_json, '$.parent_task_id') = ?
+            ORDER BY created_at ASC;
+            """,
+            (parent_task_id,),
+        )
+        tasks = []
+        for row in cursor.fetchall():
+            tasks.append(
+                TaskRecord(
+                    task_id=row[0],
+                    session_id=row[1],
+                    project_id=row[2],
+                    title=row[3],
+                    state=TaskState(row[4]),
+                    priority=row[5],
+                    routing_intent=row[6],
+                    created_at=row[7],
+                    updated_at=row[8],
+                    completed_at=row[9],
+                    error_summary=row[10],
+                    metadata=json.loads(row[11]),
+                )
+            )
+        return tasks
+
+    def get_task_lineage(self, task_id: str) -> List[TaskRecord]:
+        """Fetch the full ancestral lineage for a task from root to the given task.
+
+        Returns:
+            List[TaskRecord] ordered from root ancestor to the specified task.
+        """
+        target = self.get_task(task_id)
+        if target is None:
+            return []
+
+        lineage: List[TaskRecord] = [target]
+        visited = {target.task_id}
+        curr = target
+
+        while curr.parent_task_id and curr.parent_task_id != curr.task_id:
+            parent = self.get_task(curr.parent_task_id)
+            if parent is None or parent.task_id in visited:
+                break
+            visited.add(parent.task_id)
+            lineage.append(parent)
+            curr = parent
+
+        lineage.reverse()
+        return lineage
+
+    def get_task_hierarchy(self, root_task_id: str) -> Dict[str, Any]:
+        """Recursively build a hierarchy tree of tasks, child tasks, and checkpoints."""
+        root = self.get_task(root_task_id)
+        if root is None:
+            raise TaskNotFoundError(f"Root task '{root_task_id}' not found.")
+
+        def _build_tree(task: TaskRecord) -> Dict[str, Any]:
+            checkpoints = self.list_checkpoints(task.task_id)
+            children = self.get_child_tasks(task.task_id)
+            return {
+                "task": task,
+                "task_id": task.task_id,
+                "title": task.title,
+                "state": task.state.value,
+                "parent_task_id": task.parent_task_id,
+                "root_task_id": task.root_task_id,
+                "is_root": task.is_root,
+                "checkpoints": checkpoints,
+                "checkpoint_count": len(checkpoints),
+                "children": [_build_tree(child) for child in children],
+                "child_count": len(children),
+            }
+
+        return _build_tree(root)
+
+    def get_child_checkpoints(self, parent_task_id: str) -> List[CheckpointSnapshot]:
+        """Fetch all checkpoints belonging to direct child tasks of a parent task."""
+        children = self.get_child_tasks(parent_task_id)
+        checkpoints: List[CheckpointSnapshot] = []
+        for child in children:
+            checkpoints.extend(self.list_checkpoints(child.task_id))
+        checkpoints.sort(key=lambda cp: cp.created_at)
+        return checkpoints
+
+    def get_hierarchy_checkpoints(self, root_task_id: str) -> List[CheckpointSnapshot]:
+        """Fetch all checkpoints across a root task and all its descendants recursively."""
+        root = self.get_task(root_task_id)
+        if root is None:
+            return []
+
+        all_tasks = [root]
+        queue = [root.task_id]
+        visited = {root.task_id}
+        while queue:
+            curr_id = queue.pop(0)
+            children = self.get_child_tasks(curr_id)
+            for child in children:
+                if child.task_id not in visited:
+                    visited.add(child.task_id)
+                    all_tasks.append(child)
+                    queue.append(child.task_id)
+
+        all_checkpoints: List[CheckpointSnapshot] = []
+        for t in all_tasks:
+            all_checkpoints.extend(self.list_checkpoints(t.task_id))
+        all_checkpoints.sort(key=lambda cp: (cp.created_at, cp.checkpoint_seq))
+        return all_checkpoints

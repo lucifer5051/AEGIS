@@ -9,6 +9,7 @@ Constraints:
 
 from src.storage.database import (
     ConnectionCoordinator,
+    DatabaseAccessLock,
     SQLitePragmaConfig,
     assert_not_draining,
     can_acquire_exclusive_file_access,
@@ -118,6 +119,7 @@ __all__ = [
     "transaction",
     "DatabaseDrainingError",
     "ConnectionCoordinator",
+    "DatabaseAccessLock",
     "can_acquire_exclusive_file_access",
     # Migrations
     "Migration",

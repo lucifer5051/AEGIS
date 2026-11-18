@@ -117,168 +117,1056 @@ else:
 # ---------------------------------------------------------------------------
 # Matches any SQL statement that modifies data, schema, or transaction state.
 # READ-only statements (SELECT, PRAGMA without '=', EXPLAIN, COMMIT, ROLLBACK)
-# are not matched so that in-flight reads continue unblocked during drain.
+# are permitted so that in-flight reads continue unblocked during drain.
 #
 # Design rationale:
-# - We match on the *first* non-comment keyword so cached prepared statements
-#   cannot bypass the check (unlike set_authorizer, which is bypassed by the
-#   SQLite statement cache for re-used statements).
-# - Positive-match for PRAGMA <name> = or PRAGMA <name>( only — bare PRAGMA
-#   reads are safe and must not be blocked.
-_WRITE_SQL_PATTERN: re.Pattern[str] = re.compile(
-    r"^\s*(?:--[^\n]*\n\s*|/\*.*?\*/\s*)*"
-    r"(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|BEGIN|VACUUM|REINDEX"
-    r"|ATTACH|DETACH|PRAGMA\s+[a-zA-Z0-9_]+\s*(?:=|\())\b",
-    re.IGNORECASE | re.DOTALL,
-)
+# - Fail-closed: Any statement that is not provably read-only is rejected.
+# - Parses CTEs (WITH ... SELECT vs WITH ... INSERT/UPDATE/DELETE).
+# - Handles SAVEPOINT / RELEASE / ROLLBACK TO savepoint semantics.
+# - Handles PRAGMA assignments with any whitespace formatting around '='.
+# - Inspects Python execution layer before query dispatch to ensure prepared-
+#   statement caching cannot bypass the gate.
+
+def tokenize_sql(sql: str) -> Optional[List[tuple[str, str]]]:
+    """Tokenize SQL statement, cleanly stripping comments and normalizing tokens.
+
+    Returns None if statement contains unclosed strings or malformed comments (fail-closed).
+    """
+    tokens: List[tuple[str, str]] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        c = sql[i]
+        # Whitespace
+        if c.isspace():
+            i += 1
+            continue
+        # Line comment: -- to end of line
+        if c == "-" and i + 1 < n and sql[i + 1] == "-":
+            nl = sql.find("\n", i + 2)
+            if nl == -1:
+                break
+            i = nl + 1
+            continue
+        # Block comment: /* to */
+        if c == "/" and i + 1 < n and sql[i + 1] == "*":
+            end = sql.find("*/", i + 2)
+            if end == -1:
+                return None  # Unclosed comment: fail closed
+            i = end + 2
+            continue
+        # Single-quoted string literal: '...' (with '' escapes)
+        if c == "'":
+            start = i
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            else:
+                return None  # Unclosed string: fail closed
+            tokens.append(("STRING", sql[start:i]))
+            continue
+        # Double-quoted or backtick-quoted identifier: "..." or `...`
+        if c in ('"', "`"):
+            quote = c
+            start = i
+            i += 1
+            while i < n:
+                if sql[i] == quote:
+                    if i + 1 < n and sql[i + 1] == quote:
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            else:
+                return None  # Unclosed identifier: fail closed
+            tokens.append(("IDENT", sql[start:i]))
+            continue
+        # Square bracket quoted identifier: [...]
+        if c == "[":
+            start = i
+            i += 1
+            while i < n and sql[i] != "]":
+                i += 1
+            if i >= n or sql[i] != "]":
+                return None  # Unclosed bracket identifier: fail closed
+            i += 1
+            tokens.append(("IDENT", sql[start:i]))
+            continue
+        # Operators / punctuation: ( ) , ; = .
+        if c in "(),;=.":
+            tokens.append(("PUNCT", c))
+            i += 1
+            continue
+        # Word / Identifier / Keyword / Number
+        if c.isalnum() or c == "_":
+            start = i
+            while i < n and (sql[i].isalnum() or sql[i] == "_"):
+                i += 1
+            word = sql[start:i]
+            tokens.append(("WORD", word))
+            continue
+        tokens.append(("OP", c))
+        i += 1
+    return tokens
 
 
-def _is_write_statement(sql: str) -> bool:
-    """Return True if *sql* is a statement that writes data, schema, or opens a transaction.
+READ_ONLY_PRAGMAS = {
+    "APPLICATION_ID", "AUTO_VACUUM", "BUSY_TIMEOUT", "CACHE_SIZE",
+    "CACHE_SPILL", "CASE_SENSITIVE_LIKE", "CHECKPOINT_FULLFSYNC",
+    "COLLATION_LIST", "COMPILE_OPTIONS", "DATA_VERSION", "DATABASE_LIST",
+    "ENCODING", "FOREIGN_KEY_CHECK", "FOREIGN_KEY_LIST", "FOREIGN_KEYS",
+    "FREELIST_COUNT", "FULLFSYNC", "FUNCTION_LIST", "IGNORE_CHECK_CONSTRAINTS",
+    "INDEX_INFO", "INDEX_LIST", "INDEX_XINFO", "INTEGRITY_CHECK",
+    "JOURNAL_MODE", "JOURNAL_SIZE_LIMIT", "LEGACY_ALTER_TABLE",
+    "LOCKING_MODE", "MAX_PAGE_COUNT", "MMAP_SIZE", "MODULE_LIST",
+    "PAGE_COUNT", "PAGE_SIZE", "PRAGMA_LIST", "QUERY_ONLY", "QUICK_CHECK",
+    "READ_UNCOMMITTED", "RECURSIVE_TRIGGERS", "REVERSE_UNORDERED_SELECTS",
+    "SCHEMA_VERSION", "SECURE_DELETE", "SHORT_COLUMN_NAMES", "SYNCHRONOUS",
+    "TABLE_INFO", "TABLE_LIST", "TABLE_XINFO", "TEMP_STORE", "THREADS",
+    "USER_VERSION", "WAL_AUTOCHECKPOINT",
+}
 
-    Used by CoordinatedCursor / CoordinatedConnection to enforce the drain gate
-    so that no writes slip through while a key rotation is draining connections.
+QUERY_ARG_PRAGMAS = {
+    "TABLE_INFO", "TABLE_LIST", "TABLE_XINFO", "INDEX_INFO", "INDEX_XINFO",
+    "INDEX_LIST", "FOREIGN_KEY_LIST", "FOREIGN_KEY_CHECK", "COLLATION_LIST"
+}
+
+
+def is_safe_read_statement(sql: str) -> bool:
+    """Return True ONLY if *sql* is demonstrably a read-only statement.
+
+    Fails closed: Any statement that cannot be definitively verified as read-only
+    returns False (treated as a write) and is blocked while draining.
     """
     if not isinstance(sql, str):
         return False
-    return bool(_WRITE_SQL_PATTERN.match(sql))
+
+    tokens = tokenize_sql(sql)
+    if tokens is None:
+        return False  # Malformed SQL / comment / unclosed quote: fail closed
+    if not tokens:
+        return True  # Empty statement or comment-only is harmless
+
+    # Reject multi-statement queries: if ';' is followed by any non-punct token
+    for idx, (ttype, tval) in enumerate(tokens):
+        if tval == ";":
+            remaining_tokens = [t for t in tokens[idx + 1 :] if t[1] != ";"]
+            if remaining_tokens:
+                return False  # Multi-statement query: fail closed
+
+    first_type, first_val = tokens[0]
+    if first_type != "WORD":
+        return False
+    verb = first_val.upper()
+
+    # 1. Plain SELECT or EXPLAIN is always read-only in SQLite
+    if verb in ("SELECT", "EXPLAIN"):
+        return True
+
+    # 2. Common Table Expressions (CTE): WITH ...
+    if verb == "WITH":
+        depth = 0
+        idx = 1
+        if idx < len(tokens) and tokens[idx][1].upper() == "RECURSIVE":
+            idx += 1
+
+        final_verb = None
+        while idx < len(tokens):
+            ttype, tval = tokens[idx]
+            if tval == "(":
+                depth += 1
+            elif tval == ")":
+                depth = max(0, depth - 1)
+            elif depth == 0:
+                if ttype == "WORD":
+                    w = tval.upper()
+                    if w in ("INSERT", "UPDATE", "DELETE", "REPLACE"):
+                        return False
+                    elif w == "SELECT":
+                        final_verb = "SELECT"
+                        break
+            idx += 1
+
+        if final_verb == "SELECT":
+            return True
+        return False
+
+    # 3. PRAGMA queries
+    if verb == "PRAGMA":
+        if len(tokens) < 2:
+            return False
+        idx = 1
+        if idx + 1 < len(tokens) and tokens[idx + 1][1] == ".":
+            idx += 2
+        if idx >= len(tokens):
+            return False
+        pragma_name = tokens[idx][1].upper()
+        if pragma_name not in READ_ONLY_PRAGMAS:
+            return False
+
+        idx += 1
+        if idx >= len(tokens) or tokens[idx][1] == ";":
+            return True  # e.g. PRAGMA foreign_keys;
+
+        if tokens[idx][1] == "=":
+            return False  # Any '=' is an assignment
+
+        if tokens[idx][1] == "(":
+            # Function syntax: e.g. PRAGMA table_info('users') vs PRAGMA foreign_keys(0)
+            if pragma_name not in QUERY_ARG_PRAGMAS:
+                return False
+            has_close = False
+            for ttype, tval in tokens[idx + 1 :]:
+                if tval == ")":
+                    has_close = True
+                    break
+            if not has_close:
+                return False
+            return True
+
+        return False
+
+    # 4. In-flight transaction completion: COMMIT and ROLLBACK
+    if verb in ("COMMIT", "END"):
+        return True
+    if verb == "ROLLBACK":
+        for ttype, tval in tokens[1:]:
+            if tval.upper() == "TO":
+                return False
+        return True
+
+    return False
+
+
+def _is_write_statement(sql: str) -> bool:
+    """Return True if *sql* attempts to write data, schema, or transaction state.
+
+    Fails closed: Any statement that is not demonstrably a safe read-only operation
+    is classified as a write statement and blocked when the database is draining.
+    """
+    if not isinstance(sql, str):
+        return True
+    return not is_safe_read_statement(sql)
+
+
+def _is_begin_statement(sql: str) -> bool:
+    """Return True if *sql* starts an explicit transaction (BEGIN / BEGIN IMMEDIATE / BEGIN EXCLUSIVE)."""
+    if not isinstance(sql, str):
+        return False
+    tokens = tokenize_sql(sql)
+    if not tokens:
+        return False
+    return tokens[0][1].upper() == "BEGIN"
+
+
+def _is_transaction_end_statement(sql: str) -> bool:
+    """Return True if *sql* is a simple COMMIT, END, or simple ROLLBACK (not ROLLBACK TO savepoint).
+
+    Used to detect transaction boundaries in the execute() path so that
+    transaction-lifetime shared locks can be released after commit/rollback.
+    ROLLBACK TO <savepoint> is NOT a transaction end - it is treated as a write
+    statement elsewhere and the transaction continues.
+    """
+    if not isinstance(sql, str):
+        return False
+    tokens = tokenize_sql(sql)
+    if not tokens:
+        return False
+    verb = tokens[0][1].upper()
+    if verb in ("COMMIT", "END"):
+        return True
+    if verb == "ROLLBACK":
+        # Simple ROLLBACK ends the transaction; ROLLBACK TO <savepoint> does not
+        return not any(t[1].upper() == "TO" for t in tokens[1:])
+    return False
 
 
 # ---------------------------------------------------------------------------
 # Coordinated Connection & Cursor classes
 # ---------------------------------------------------------------------------
-# These subclasses intercept every write-capable SQL method and raise
-# DatabaseDrainingError if the database is currently being drained for key
-# rotation.  They are injected via the ``factory=`` parameter of
-# sqlite3.connect / sqlcipher3.connect so that *every* connection returned by
-# create_connection() automatically enforces the drain gate — no per-store
-# patching is required.
+# These subclasses intercept every write-capable SQL method and enforce the
+# DatabaseAccessLock protocol:
+# - Active key rotation / draining blocks new writes and transaction starts.
+# - In-transaction writes acquire-and-hold a shared DatabaseAccessLock for the
+#   full transaction lifetime until commit/rollback.
+# - Explicit BEGIN acquires and holds the shared lock immediately.
+# - Exclusive rotation lock cannot be granted while a transaction holds the lock.
+# - commit() without a shared lock fails closed if rotation holds exclusive lock.
+# - In-flight transactions are permitted to finish before rotation rekeys.
+# - Stale connections without an active lock are invalidated fail-closed.
 
 
 class CoordinatedCursor(sqlite3.Cursor):
-    """sqlite3.Cursor subclass that blocks write statements while draining."""
+    """sqlite3.Cursor subclass that coordinates writes and transaction locks."""
 
     def execute(self, sql: str, parameters: Any = (), /) -> "CoordinatedCursor":
+        db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+        held_lock = ConnectionCoordinator.get_connection_lock(self.connection) if db_path else None
+        if db_path and ConnectionCoordinator.is_marked_for_drain(self.connection) and held_lock is None:
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+            )
+
+        if _is_begin_statement(sql):
+            if db_path:
+                if ConnectionCoordinator.is_draining(db_path):
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; transaction rejected."
+                    )
+                if held_lock is None:
+                    new_lock = DatabaseAccessLock(db_path)
+                    if not new_lock.acquire_shared(timeout_sec=0.2):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is locked by active key rotation; transaction rejected."
+                        )
+                    ConnectionCoordinator.set_connection_lock(self.connection, new_lock)
+            try:
+                return super().execute(sql, parameters)
+            except Exception:
+                if db_path and ConnectionCoordinator.get_connection_lock(self.connection) is not None:
+                    ConnectionCoordinator.clear_connection_lock(self.connection)
+                raise
+
         if _is_write_statement(sql):
-            db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
-            if db_path and ConnectionCoordinator.is_draining(db_path):
-                raise DatabaseDrainingError(
-                    f"Database '{db_path}' is draining for key rotation; write rejected."
-                )
+            if db_path:
+                if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; write rejected."
+                    )
+                if getattr(self.connection, "in_transaction", False) or held_lock is not None:
+                    if held_lock is None:
+                        new_lock = DatabaseAccessLock(db_path)
+                        if not new_lock.acquire_shared(timeout_sec=0.2):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; write rejected."
+                            )
+                        ConnectionCoordinator.set_connection_lock(self.connection, new_lock)
+                    return super().execute(sql, parameters)
+                else:
+                    lock = DatabaseAccessLock(db_path)
+                    if not lock.acquire_shared(timeout_sec=0.1):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is locked by active key rotation; write rejected."
+                        )
+                    try:
+                        res = super().execute(sql, parameters)
+                        if getattr(self.connection, "in_transaction", False):
+                            ConnectionCoordinator.set_connection_lock(self.connection, lock)
+                            lock = None
+                        return res
+                    finally:
+                        if lock is not None:
+                            lock.release()
+        else:
+            if db_path and _is_transaction_end_statement(sql):
+                tokens = tokenize_sql(sql)
+                verb = tokens[0][1].upper() if tokens else ""
+                if verb in ("COMMIT", "END"):
+                    if ConnectionCoordinator.is_draining(db_path) and ConnectionCoordinator.get_connection_lock(self.connection) is None:
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is draining for key rotation; commit rejected."
+                        )
+                    if ConnectionCoordinator.get_connection_lock(self.connection) is None:
+                        lock = DatabaseAccessLock(db_path)
+                        if not lock.acquire_shared(timeout_sec=0.1):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; commit rejected."
+                            )
+                        lock.release()
+                try:
+                    return super().execute(sql, parameters)
+                finally:
+                    ConnectionCoordinator.clear_connection_lock(self.connection)
         return super().execute(sql, parameters)
 
     def executemany(self, sql: str, seq_of_parameters: Any, /) -> "CoordinatedCursor":
+        db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+        held_lock = ConnectionCoordinator.get_connection_lock(self.connection) if db_path else None
+        if db_path and ConnectionCoordinator.is_marked_for_drain(self.connection) and held_lock is None:
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+            )
         if _is_write_statement(sql):
-            db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
-            if db_path and ConnectionCoordinator.is_draining(db_path):
-                raise DatabaseDrainingError(
-                    f"Database '{db_path}' is draining for key rotation; write rejected."
-                )
+            if db_path:
+                if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; write rejected."
+                    )
+                if getattr(self.connection, "in_transaction", False) or held_lock is not None:
+                    if held_lock is None:
+                        new_lock = DatabaseAccessLock(db_path)
+                        if not new_lock.acquire_shared(timeout_sec=0.2):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; write rejected."
+                            )
+                        ConnectionCoordinator.set_connection_lock(self.connection, new_lock)
+                    return super().executemany(sql, seq_of_parameters)
+                else:
+                    lock = DatabaseAccessLock(db_path)
+                    if not lock.acquire_shared(timeout_sec=0.1):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is locked by active key rotation; write rejected."
+                        )
+                    try:
+                        res = super().executemany(sql, seq_of_parameters)
+                        if getattr(self.connection, "in_transaction", False):
+                            ConnectionCoordinator.set_connection_lock(self.connection, lock)
+                            lock = None
+                        return res
+                    finally:
+                        if lock is not None:
+                            lock.release()
         return super().executemany(sql, seq_of_parameters)
 
     def executescript(self, sql_script: str, /) -> "CoordinatedCursor":
         db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
-        if db_path and ConnectionCoordinator.is_draining(db_path):
-            raise DatabaseDrainingError(
-                f"Database '{db_path}' is draining for key rotation; script rejected."
-            )
+        if db_path:
+            held_lock = ConnectionCoordinator.get_connection_lock(self.connection)
+            if ConnectionCoordinator.is_marked_for_drain(self.connection) and held_lock is None:
+                try:
+                    self.connection.close()
+                except Exception:
+                    pass
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+                )
+            if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' is draining for key rotation; script rejected."
+                )
+            if held_lock is None:
+                access_lock = DatabaseAccessLock(db_path)
+                if not access_lock.acquire_shared(timeout_sec=0.1):
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is locked by active key rotation; script rejected."
+                    )
+                try:
+                    return super().executescript(sql_script)
+                finally:
+                    access_lock.release()
+            else:
+                try:
+                    return super().executescript(sql_script)
+                finally:
+                    ConnectionCoordinator.clear_connection_lock(self.connection)
         return super().executescript(sql_script)
 
 
 class CoordinatedConnection(sqlite3.Connection):
-    """sqlite3.Connection subclass that blocks write statements while draining."""
+    """sqlite3.Connection subclass that coordinates writes and transaction locks."""
 
     def cursor(self, factory: Any = None) -> CoordinatedCursor:
         return super().cursor(factory or CoordinatedCursor)
 
     def execute(self, sql: str, parameters: Any = (), /) -> CoordinatedCursor:
+        db_path = ConnectionCoordinator.get_connection_db_path(self)
+        held_lock = ConnectionCoordinator.get_connection_lock(self) if db_path else None
+        if db_path and ConnectionCoordinator.is_marked_for_drain(self) and held_lock is None:
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+            )
+
+        if _is_begin_statement(sql):
+            if db_path:
+                if ConnectionCoordinator.is_draining(db_path):
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; transaction rejected."
+                    )
+                if held_lock is None:
+                    new_lock = DatabaseAccessLock(db_path)
+                    if not new_lock.acquire_shared(timeout_sec=0.2):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is locked by active key rotation; transaction rejected."
+                        )
+                    ConnectionCoordinator.set_connection_lock(self, new_lock)
+            try:
+                return super().execute(sql, parameters)
+            except Exception:
+                if db_path and ConnectionCoordinator.get_connection_lock(self) is not None:
+                    ConnectionCoordinator.clear_connection_lock(self)
+                raise
+
         if _is_write_statement(sql):
-            db_path = ConnectionCoordinator.get_connection_db_path(self)
-            if db_path and ConnectionCoordinator.is_draining(db_path):
-                raise DatabaseDrainingError(
-                    f"Database '{db_path}' is draining for key rotation; write rejected."
-                )
+            if db_path:
+                if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; write rejected."
+                    )
+                if getattr(self, "in_transaction", False) or held_lock is not None:
+                    if held_lock is None:
+                        new_lock = DatabaseAccessLock(db_path)
+                        if not new_lock.acquire_shared(timeout_sec=0.2):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; write rejected."
+                            )
+                        ConnectionCoordinator.set_connection_lock(self, new_lock)
+                    return super().execute(sql, parameters)
+                else:
+                    lock = DatabaseAccessLock(db_path)
+                    if not lock.acquire_shared(timeout_sec=0.1):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is locked by active key rotation; write rejected."
+                        )
+                    try:
+                        res = super().execute(sql, parameters)
+                        if getattr(self, "in_transaction", False):
+                            ConnectionCoordinator.set_connection_lock(self, lock)
+                            lock = None
+                        return res
+                    finally:
+                        if lock is not None:
+                            lock.release()
+        else:
+            if db_path and _is_transaction_end_statement(sql):
+                tokens = tokenize_sql(sql)
+                verb = tokens[0][1].upper() if tokens else ""
+                if verb in ("COMMIT", "END"):
+                    if ConnectionCoordinator.is_draining(db_path) and ConnectionCoordinator.get_connection_lock(self) is None:
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is draining for key rotation; commit rejected."
+                        )
+                    if ConnectionCoordinator.get_connection_lock(self) is None:
+                        lock = DatabaseAccessLock(db_path)
+                        if not lock.acquire_shared(timeout_sec=0.1):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; commit rejected."
+                            )
+                        lock.release()
+                try:
+                    return super().execute(sql, parameters)
+                finally:
+                    ConnectionCoordinator.clear_connection_lock(self)
         return super().execute(sql, parameters)
 
     def executemany(self, sql: str, seq_of_parameters: Any, /) -> CoordinatedCursor:
+        db_path = ConnectionCoordinator.get_connection_db_path(self)
+        held_lock = ConnectionCoordinator.get_connection_lock(self) if db_path else None
+        if db_path and ConnectionCoordinator.is_marked_for_drain(self) and held_lock is None:
+            try:
+                self.close()
+            except Exception:
+                pass
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+            )
         if _is_write_statement(sql):
-            db_path = ConnectionCoordinator.get_connection_db_path(self)
-            if db_path and ConnectionCoordinator.is_draining(db_path):
-                raise DatabaseDrainingError(
-                    f"Database '{db_path}' is draining for key rotation; write rejected."
-                )
+            if db_path:
+                if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; write rejected."
+                    )
+                if getattr(self, "in_transaction", False) or held_lock is not None:
+                    if held_lock is None:
+                        new_lock = DatabaseAccessLock(db_path)
+                        if not new_lock.acquire_shared(timeout_sec=0.2):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; write rejected."
+                            )
+                        ConnectionCoordinator.set_connection_lock(self, new_lock)
+                    return super().executemany(sql, seq_of_parameters)
+                else:
+                    lock = DatabaseAccessLock(db_path)
+                    if not lock.acquire_shared(timeout_sec=0.1):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is locked by active key rotation; write rejected."
+                        )
+                    try:
+                        res = super().executemany(sql, seq_of_parameters)
+                        if getattr(self, "in_transaction", False):
+                            ConnectionCoordinator.set_connection_lock(self, lock)
+                            lock = None
+                        return res
+                    finally:
+                        if lock is not None:
+                            lock.release()
         return super().executemany(sql, seq_of_parameters)
 
     def executescript(self, sql_script: str, /) -> CoordinatedCursor:
         db_path = ConnectionCoordinator.get_connection_db_path(self)
-        if db_path and ConnectionCoordinator.is_draining(db_path):
-            raise DatabaseDrainingError(
-                f"Database '{db_path}' is draining for key rotation; script rejected."
-            )
+        if db_path:
+            held_lock = ConnectionCoordinator.get_connection_lock(self)
+            if ConnectionCoordinator.is_marked_for_drain(self) and held_lock is None:
+                try:
+                    self.close()
+                except Exception:
+                    pass
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+                )
+            if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' is draining for key rotation; script rejected."
+                )
+            if held_lock is None:
+                access_lock = DatabaseAccessLock(db_path)
+                if not access_lock.acquire_shared(timeout_sec=0.1):
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is locked by active key rotation; script rejected."
+                    )
+                try:
+                    return super().executescript(sql_script)
+                finally:
+                    access_lock.release()
+            else:
+                try:
+                    return super().executescript(sql_script)
+                finally:
+                    ConnectionCoordinator.clear_connection_lock(self)
         return super().executescript(sql_script)
+
+    def commit(self) -> None:  # type: ignore[override]
+        """Commit the current transaction and release the transaction-lifetime shared access lock."""
+        db_path = ConnectionCoordinator.get_connection_db_path(self)
+        held_lock = ConnectionCoordinator.get_connection_lock(self) if db_path else None
+        if db_path:
+            if ConnectionCoordinator.is_marked_for_drain(self) and held_lock is None:
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' connection was marked for drain during key rotation; commit rejected."
+                )
+            if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' is draining for key rotation; commit rejected."
+                )
+            if held_lock is None:
+                lock = DatabaseAccessLock(db_path)
+                if not lock.acquire_shared(timeout_sec=0.1):
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is locked by active key rotation; commit rejected."
+                    )
+                lock.release()
+        try:
+            super().commit()
+        finally:
+            if db_path:
+                ConnectionCoordinator.clear_connection_lock(self)
+                if ConnectionCoordinator.is_marked_for_drain(self):
+                    try:
+                        self.close()
+                    except Exception:
+                        pass
+
+    def rollback(self) -> None:  # type: ignore[override]
+        """Roll back the current transaction and release the transaction-lifetime shared access lock."""
+        try:
+            super().rollback()
+        finally:
+            db_path = ConnectionCoordinator.get_connection_db_path(self)
+            if db_path:
+                ConnectionCoordinator.clear_connection_lock(self)
+                if ConnectionCoordinator.is_marked_for_drain(self):
+                    try:
+                        self.close()
+                    except Exception:
+                        pass
+
+    def close(self) -> None:  # type: ignore[override]
+        """Release any held transaction-lifetime shared access lock before closing the connection."""
+        db_path = ConnectionCoordinator.get_connection_db_path(self)
+        if db_path:
+            ConnectionCoordinator.clear_connection_lock(self)
+        super().close()
 
 
 if SQLCIPHER_AVAILABLE:
     class CoordinatedSQLCipherCursor(sqlcipher_dbapi2.Cursor):  # type: ignore[misc]
-        """sqlcipher3.Cursor subclass that blocks write statements while draining."""
+        """sqlcipher3.Cursor subclass that coordinates writes and transaction locks."""
 
         def execute(self, sql: str, parameters: Any = (), /) -> "CoordinatedSQLCipherCursor":
+            db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+            held_lock = ConnectionCoordinator.get_connection_lock(self.connection) if db_path else None
+            if db_path and ConnectionCoordinator.is_marked_for_drain(self.connection) and held_lock is None:
+                try:
+                    self.connection.close()
+                except Exception:
+                    pass
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+                )
+
+            if _is_begin_statement(sql):
+                if db_path:
+                    if ConnectionCoordinator.is_draining(db_path):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is draining for key rotation; transaction rejected."
+                        )
+                    if held_lock is None:
+                        new_lock = DatabaseAccessLock(db_path)
+                        if not new_lock.acquire_shared(timeout_sec=0.2):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; transaction rejected."
+                            )
+                        ConnectionCoordinator.set_connection_lock(self.connection, new_lock)
+                try:
+                    return super().execute(sql, parameters)
+                except Exception:
+                    if db_path and ConnectionCoordinator.get_connection_lock(self.connection) is not None:
+                        ConnectionCoordinator.clear_connection_lock(self.connection)
+                    raise
+
             if _is_write_statement(sql):
-                db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
-                if db_path and ConnectionCoordinator.is_draining(db_path):
-                    raise DatabaseDrainingError(
-                        f"Database '{db_path}' is draining for key rotation; write rejected."
-                    )
+                if db_path:
+                    if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is draining for key rotation; write rejected."
+                        )
+                    if getattr(self.connection, "in_transaction", False) or held_lock is not None:
+                        if held_lock is None:
+                            new_lock = DatabaseAccessLock(db_path)
+                            if not new_lock.acquire_shared(timeout_sec=0.2):
+                                raise DatabaseDrainingError(
+                                    f"Database '{db_path}' is locked by active key rotation; write rejected."
+                                )
+                            ConnectionCoordinator.set_connection_lock(self.connection, new_lock)
+                        return super().execute(sql, parameters)
+                    else:
+                        lock = DatabaseAccessLock(db_path)
+                        if not lock.acquire_shared(timeout_sec=0.1):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; write rejected."
+                            )
+                        try:
+                            res = super().execute(sql, parameters)
+                            if getattr(self.connection, "in_transaction", False):
+                                ConnectionCoordinator.set_connection_lock(self.connection, lock)
+                                lock = None
+                            return res
+                        finally:
+                            if lock is not None:
+                                lock.release()
+            else:
+                if db_path and _is_transaction_end_statement(sql):
+                    tokens = tokenize_sql(sql)
+                    verb = tokens[0][1].upper() if tokens else ""
+                    if verb in ("COMMIT", "END"):
+                        if ConnectionCoordinator.is_draining(db_path) and ConnectionCoordinator.get_connection_lock(self.connection) is None:
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is draining for key rotation; commit rejected."
+                            )
+                        if ConnectionCoordinator.get_connection_lock(self.connection) is None:
+                            lock = DatabaseAccessLock(db_path)
+                            if not lock.acquire_shared(timeout_sec=0.1):
+                                raise DatabaseDrainingError(
+                                    f"Database '{db_path}' is locked by active key rotation; commit rejected."
+                                )
+                            lock.release()
+                    try:
+                        return super().execute(sql, parameters)
+                    finally:
+                        ConnectionCoordinator.clear_connection_lock(self.connection)
             return super().execute(sql, parameters)
 
         def executemany(self, sql: str, seq_of_parameters: Any, /) -> "CoordinatedSQLCipherCursor":
+            db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
+            held_lock = ConnectionCoordinator.get_connection_lock(self.connection) if db_path else None
+            if db_path and ConnectionCoordinator.is_marked_for_drain(self.connection) and held_lock is None:
+                try:
+                    self.connection.close()
+                except Exception:
+                    pass
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+                )
             if _is_write_statement(sql):
-                db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
-                if db_path and ConnectionCoordinator.is_draining(db_path):
-                    raise DatabaseDrainingError(
-                        f"Database '{db_path}' is draining for key rotation; write rejected."
-                    )
+                if db_path:
+                    if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is draining for key rotation; write rejected."
+                        )
+                    if getattr(self.connection, "in_transaction", False) or held_lock is not None:
+                        if held_lock is None:
+                            new_lock = DatabaseAccessLock(db_path)
+                            if not new_lock.acquire_shared(timeout_sec=0.2):
+                                raise DatabaseDrainingError(
+                                    f"Database '{db_path}' is locked by active key rotation; write rejected."
+                                )
+                            ConnectionCoordinator.set_connection_lock(self.connection, new_lock)
+                        return super().executemany(sql, seq_of_parameters)
+                    else:
+                        lock = DatabaseAccessLock(db_path)
+                        if not lock.acquire_shared(timeout_sec=0.1):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; write rejected."
+                            )
+                        try:
+                            res = super().executemany(sql, seq_of_parameters)
+                            if getattr(self.connection, "in_transaction", False):
+                                ConnectionCoordinator.set_connection_lock(self.connection, lock)
+                                lock = None
+                            return res
+                        finally:
+                            if lock is not None:
+                                lock.release()
             return super().executemany(sql, seq_of_parameters)
 
         def executescript(self, sql_script: str, /) -> "CoordinatedSQLCipherCursor":
             db_path = ConnectionCoordinator.get_connection_db_path(self.connection)
-            if db_path and ConnectionCoordinator.is_draining(db_path):
-                raise DatabaseDrainingError(
-                    f"Database '{db_path}' is draining for key rotation; script rejected."
-                )
+            if db_path:
+                held_lock = ConnectionCoordinator.get_connection_lock(self.connection)
+                if ConnectionCoordinator.is_marked_for_drain(self.connection) and held_lock is None:
+                    try:
+                        self.connection.close()
+                    except Exception:
+                        pass
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+                    )
+                if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; script rejected."
+                    )
+                if held_lock is None:
+                    access_lock = DatabaseAccessLock(db_path)
+                    if not access_lock.acquire_shared(timeout_sec=0.1):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is locked by active key rotation; script rejected."
+                        )
+                    try:
+                        return super().executescript(sql_script)
+                    finally:
+                        access_lock.release()
+                else:
+                    try:
+                        return super().executescript(sql_script)
+                    finally:
+                        ConnectionCoordinator.clear_connection_lock(self.connection)
             return super().executescript(sql_script)
 
     class CoordinatedSQLCipherConnection(sqlcipher_dbapi2.Connection):  # type: ignore[misc]
-        """sqlcipher3.Connection subclass that blocks write statements while draining."""
+        """sqlcipher3.Connection subclass that coordinates writes and transaction locks."""
 
         def cursor(self, factory: Any = None) -> "CoordinatedSQLCipherCursor":
             return super().cursor(factory or CoordinatedSQLCipherCursor)
 
         def execute(self, sql: str, parameters: Any = (), /) -> "CoordinatedSQLCipherCursor":
+            db_path = ConnectionCoordinator.get_connection_db_path(self)
+            held_lock = ConnectionCoordinator.get_connection_lock(self) if db_path else None
+            if db_path and ConnectionCoordinator.is_marked_for_drain(self) and held_lock is None:
+                try:
+                    self.close()
+                except Exception:
+                    pass
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+                )
+
+            if _is_begin_statement(sql):
+                if db_path:
+                    if ConnectionCoordinator.is_draining(db_path):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is draining for key rotation; transaction rejected."
+                        )
+                    if held_lock is None:
+                        new_lock = DatabaseAccessLock(db_path)
+                        if not new_lock.acquire_shared(timeout_sec=0.2):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; transaction rejected."
+                            )
+                        ConnectionCoordinator.set_connection_lock(self, new_lock)
+                try:
+                    return super().execute(sql, parameters)
+                except Exception:
+                    if db_path and ConnectionCoordinator.get_connection_lock(self) is not None:
+                        ConnectionCoordinator.clear_connection_lock(self)
+                    raise
+
             if _is_write_statement(sql):
-                db_path = ConnectionCoordinator.get_connection_db_path(self)
-                if db_path and ConnectionCoordinator.is_draining(db_path):
-                    raise DatabaseDrainingError(
-                        f"Database '{db_path}' is draining for key rotation; write rejected."
-                    )
+                if db_path:
+                    if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is draining for key rotation; write rejected."
+                        )
+                    if getattr(self, "in_transaction", False) or held_lock is not None:
+                        if held_lock is None:
+                            new_lock = DatabaseAccessLock(db_path)
+                            if not new_lock.acquire_shared(timeout_sec=0.2):
+                                raise DatabaseDrainingError(
+                                    f"Database '{db_path}' is locked by active key rotation; write rejected."
+                                )
+                            ConnectionCoordinator.set_connection_lock(self, new_lock)
+                        return super().execute(sql, parameters)
+                    else:
+                        lock = DatabaseAccessLock(db_path)
+                        if not lock.acquire_shared(timeout_sec=0.1):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; write rejected."
+                            )
+                        try:
+                            res = super().execute(sql, parameters)
+                            if getattr(self, "in_transaction", False):
+                                ConnectionCoordinator.set_connection_lock(self, lock)
+                                lock = None
+                            return res
+                        finally:
+                            if lock is not None:
+                                lock.release()
+            else:
+                if db_path and _is_transaction_end_statement(sql):
+                    tokens = tokenize_sql(sql)
+                    verb = tokens[0][1].upper() if tokens else ""
+                    if verb in ("COMMIT", "END"):
+                        if ConnectionCoordinator.is_draining(db_path) and ConnectionCoordinator.get_connection_lock(self) is None:
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is draining for key rotation; commit rejected."
+                            )
+                        if ConnectionCoordinator.get_connection_lock(self) is None:
+                            lock = DatabaseAccessLock(db_path)
+                            if not lock.acquire_shared(timeout_sec=0.1):
+                                raise DatabaseDrainingError(
+                                    f"Database '{db_path}' is locked by active key rotation; commit rejected."
+                                )
+                            lock.release()
+                    try:
+                        return super().execute(sql, parameters)
+                    finally:
+                        ConnectionCoordinator.clear_connection_lock(self)
             return super().execute(sql, parameters)
 
         def executemany(self, sql: str, seq_of_parameters: Any, /) -> "CoordinatedSQLCipherCursor":
+            db_path = ConnectionCoordinator.get_connection_db_path(self)
+            held_lock = ConnectionCoordinator.get_connection_lock(self) if db_path else None
+            if db_path and ConnectionCoordinator.is_marked_for_drain(self) and held_lock is None:
+                try:
+                    self.close()
+                except Exception:
+                    pass
+                raise DatabaseDrainingError(
+                    f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+                )
             if _is_write_statement(sql):
-                db_path = ConnectionCoordinator.get_connection_db_path(self)
-                if db_path and ConnectionCoordinator.is_draining(db_path):
-                    raise DatabaseDrainingError(
-                        f"Database '{db_path}' is draining for key rotation; write rejected."
-                    )
+                if db_path:
+                    if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is draining for key rotation; write rejected."
+                        )
+                    if getattr(self, "in_transaction", False) or held_lock is not None:
+                        if held_lock is None:
+                            new_lock = DatabaseAccessLock(db_path)
+                            if not new_lock.acquire_shared(timeout_sec=0.2):
+                                raise DatabaseDrainingError(
+                                    f"Database '{db_path}' is locked by active key rotation; write rejected."
+                                )
+                            ConnectionCoordinator.set_connection_lock(self, new_lock)
+                        return super().executemany(sql, seq_of_parameters)
+                    else:
+                        lock = DatabaseAccessLock(db_path)
+                        if not lock.acquire_shared(timeout_sec=0.1):
+                            raise DatabaseDrainingError(
+                                f"Database '{db_path}' is locked by active key rotation; write rejected."
+                            )
+                        try:
+                            res = super().executemany(sql, seq_of_parameters)
+                            if getattr(self, "in_transaction", False):
+                                ConnectionCoordinator.set_connection_lock(self, lock)
+                                lock = None
+                            return res
+                        finally:
+                            if lock is not None:
+                                lock.release()
             return super().executemany(sql, seq_of_parameters)
 
         def executescript(self, sql_script: str, /) -> "CoordinatedSQLCipherCursor":
             db_path = ConnectionCoordinator.get_connection_db_path(self)
-            if db_path and ConnectionCoordinator.is_draining(db_path):
-                raise DatabaseDrainingError(
-                    f"Database '{db_path}' is draining for key rotation; script rejected."
-                )
+            if db_path:
+                held_lock = ConnectionCoordinator.get_connection_lock(self)
+                if ConnectionCoordinator.is_marked_for_drain(self) and held_lock is None:
+                    try:
+                        self.close()
+                    except Exception:
+                        pass
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' connection was marked for drain during key rotation; operation rejected."
+                    )
+                if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; script rejected."
+                    )
+                if held_lock is None:
+                    access_lock = DatabaseAccessLock(db_path)
+                    if not access_lock.acquire_shared(timeout_sec=0.1):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is locked by active key rotation; script rejected."
+                        )
+                    try:
+                        return super().executescript(sql_script)
+                    finally:
+                        access_lock.release()
+                else:
+                    try:
+                        return super().executescript(sql_script)
+                    finally:
+                        ConnectionCoordinator.clear_connection_lock(self)
             return super().executescript(sql_script)
+
+        def commit(self) -> None:  # type: ignore[override]
+            """Commit and release the transaction-lifetime shared access lock."""
+            db_path = ConnectionCoordinator.get_connection_db_path(self)
+            held_lock = ConnectionCoordinator.get_connection_lock(self) if db_path else None
+            if db_path:
+                if ConnectionCoordinator.is_marked_for_drain(self) and held_lock is None:
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' connection was marked for drain during key rotation; commit rejected."
+                    )
+                if ConnectionCoordinator.is_draining(db_path) and held_lock is None:
+                    raise DatabaseDrainingError(
+                        f"Database '{db_path}' is draining for key rotation; commit rejected."
+                    )
+                if held_lock is None:
+                    lock = DatabaseAccessLock(db_path)
+                    if not lock.acquire_shared(timeout_sec=0.1):
+                        raise DatabaseDrainingError(
+                            f"Database '{db_path}' is locked by active key rotation; commit rejected."
+                        )
+                    lock.release()
+            try:
+                super().commit()
+            finally:
+                if db_path:
+                    ConnectionCoordinator.clear_connection_lock(self)
+                    if ConnectionCoordinator.is_marked_for_drain(self):
+                        try:
+                            self.close()
+                        except Exception:
+                            pass
+
+        def rollback(self) -> None:  # type: ignore[override]
+            """Roll back and release the transaction-lifetime shared access lock."""
+            try:
+                super().rollback()
+            finally:
+                db_path = ConnectionCoordinator.get_connection_db_path(self)
+                if db_path:
+                    ConnectionCoordinator.clear_connection_lock(self)
+                    if ConnectionCoordinator.is_marked_for_drain(self):
+                        try:
+                            self.close()
+                        except Exception:
+                            pass
+
+        def close(self) -> None:  # type: ignore[override]
+            """Release any held transaction-lifetime lock before closing."""
+            db_path = ConnectionCoordinator.get_connection_db_path(self)
+            if db_path:
+                ConnectionCoordinator.clear_connection_lock(self)
+            super().close()
 else:
     # Fallback stubs when sqlcipher3 is not available so code that references
     # these names at import time does not raise NameError.
@@ -379,6 +1267,171 @@ def can_acquire_exclusive_file_access(file_path: Path | str) -> bool:
         return True
 
 
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    class _OVERLAPPED(ctypes.Structure):
+        _fields_ = [
+            ("Internal", wintypes.ULONG),
+            ("InternalHigh", wintypes.ULONG),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+
+class DatabaseAccessLock:
+    """True OS-level cross-process reader/writer lock for SQLite databases.
+
+    On Windows: Uses kernel32.LockFileEx / UnlockFileEx on a dedicated `<db>.access.lock` file.
+    On POSIX: Uses fcntl.flock(fd, LOCK_SH / LOCK_EX).
+    """
+
+    def __init__(self, db_path: Path | str) -> None:
+        self.db_path = Path(db_path).resolve()
+        self.lock_file = self.db_path.with_name(f"{self.db_path.name}.access.lock")
+        self._handle: Any = None
+        self._fd: Optional[int] = None
+        self._mode: Optional[str] = None
+        self._is_win32 = sys.platform == "win32"
+        if self._is_win32:
+            self._ov = _OVERLAPPED()
+
+    def _open_handle(self) -> None:
+        if self._is_win32:
+            if self._handle is None or self._handle == -1:
+                self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+                if not self.lock_file.is_file():
+                    try:
+                        self.lock_file.write_bytes(b"\x00" * 1024)
+                    except Exception:
+                        pass
+                import ctypes
+
+                kernel32 = ctypes.windll.kernel32
+                GENERIC_READ = 0x80000000
+                GENERIC_WRITE = 0x40000000
+                FILE_SHARE_READ = 1
+                FILE_SHARE_WRITE = 2
+                OPEN_ALWAYS = 4
+                FILE_ATTRIBUTE_NORMAL = 0x80
+
+                self._handle = kernel32.CreateFileW(
+                    str(self.lock_file),
+                    GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    None,
+                    OPEN_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL,
+                    None,
+                )
+                if self._handle == -1 or self._handle == 0xFFFFFFFF:
+                    raise OSError(f"Failed to open database access lock file '{self.lock_file}'")
+        else:
+            if self._fd is None:
+                self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+                self._fd = os.open(str(self.lock_file), os.O_CREAT | os.O_RDWR)
+
+    def acquire_shared(self, timeout_sec: float = 5.0) -> bool:
+        self._open_handle()
+        start = time.time()
+        if self._is_win32:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
+            while True:
+                res = kernel32.LockFileEx(
+                    self._handle,
+                    LOCKFILE_FAIL_IMMEDIATELY,
+                    0,
+                    1,
+                    0,
+                    ctypes.byref(self._ov),
+                )
+                if res:
+                    self._mode = "SHARED"
+                    return True
+                if time.time() - start >= timeout_sec:
+                    return False
+                time.sleep(0.005)
+        else:
+            import fcntl
+
+            while True:
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_SH | fcntl.LOCK_NB)  # type: ignore[arg-type]
+                    self._mode = "SHARED"
+                    return True
+                except (BlockingIOError, OSError):
+                    if time.time() - start >= timeout_sec:
+                        return False
+                    time.sleep(0.005)
+
+    def acquire_exclusive(self, timeout_sec: float = 10.0) -> bool:
+        self._open_handle()
+        start = time.time()
+        if self._is_win32:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+            LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
+            flags = LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY
+            while True:
+                res = kernel32.LockFileEx(
+                    self._handle,
+                    flags,
+                    0,
+                    1,
+                    0,
+                    ctypes.byref(self._ov),
+                )
+                if res:
+                    self._mode = "EXCLUSIVE"
+                    return True
+                if time.time() - start >= timeout_sec:
+                    return False
+                time.sleep(0.005)
+        else:
+            import fcntl
+
+            while True:
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[arg-type]
+                    self._mode = "EXCLUSIVE"
+                    return True
+                except (BlockingIOError, OSError):
+                    if time.time() - start >= timeout_sec:
+                        return False
+                    time.sleep(0.005)
+
+    def release(self) -> None:
+        if self._mode is None:
+            return
+        if self._is_win32:
+            if self._handle is not None and self._handle != -1 and self._handle != 0xFFFFFFFF:
+                import ctypes
+
+                kernel32 = ctypes.windll.kernel32
+                kernel32.UnlockFileEx(self._handle, 0, 1, 0, ctypes.byref(self._ov))
+                kernel32.CloseHandle(self._handle)
+                self._handle = None
+                self._mode = None
+        else:
+            if self._fd is not None:
+                import fcntl
+
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+                    os.close(self._fd)
+                except Exception:
+                    pass
+                self._fd = None
+                self._mode = None
+
+
 class ConnectionCoordinator:
     """Coordinates active database connections and draining for maintenance and key rotation.
 
@@ -397,6 +1450,9 @@ class ConnectionCoordinator:
     _marked_for_drain: set[int] = set()
     _conn_paths: Dict[int, str] = {}
     _conn_in_tx: set[int] = set()
+    # Maps id(conn) -> DatabaseAccessLock held for the current transaction lifetime.
+    # Populated by the first write inside a transaction; cleared on commit/rollback/close.
+    _conn_locks: Dict[int, Any] = {}
 
     @classmethod
     def get_drain_path(cls, db_path: Path | str) -> Path:
@@ -432,12 +1488,42 @@ class ConnectionCoordinator:
     @classmethod
     def unregister_connection(cls, conn: Any) -> None:
         conn_id = id(conn)
+        lock_to_release = None
         with cls._lock:
             cls._marked_for_drain.discard(conn_id)
             cls._conn_in_tx.discard(conn_id)
             path_str = cls._conn_paths.pop(conn_id, None)
             if path_str and path_str in cls._connections:
                 cls._connections[path_str].pop(conn_id, None)
+            lock_to_release = cls._conn_locks.pop(conn_id, None)
+        if lock_to_release is not None:
+            try:
+                lock_to_release.release()
+            except Exception:
+                pass
+
+    @classmethod
+    def get_connection_lock(cls, conn: Any) -> Optional["DatabaseAccessLock"]:
+        """Return the transaction-lifetime shared DatabaseAccessLock held by *conn*, or None."""
+        with cls._lock:
+            return cls._conn_locks.get(id(conn))
+
+    @classmethod
+    def set_connection_lock(cls, conn: Any, lock: "DatabaseAccessLock") -> None:
+        """Register a transaction-lifetime shared lock for *conn*."""
+        with cls._lock:
+            cls._conn_locks[id(conn)] = lock
+
+    @classmethod
+    def clear_connection_lock(cls, conn: Any) -> None:
+        """Release and deregister the transaction-lifetime lock held by *conn* (idempotent)."""
+        with cls._lock:
+            lock = cls._conn_locks.pop(id(conn), None)
+        if lock is not None:
+            try:
+                lock.release()
+            except Exception:
+                pass
 
     @classmethod
     def get_connection_db_path(cls, conn: Any) -> Optional[str]:
@@ -698,6 +1784,19 @@ def create_connection(
                 raise DatabaseDrainingError(
                     f"Database '{validated_path}' is currently draining for key rotation."
                 )
+        access_lock = DatabaseAccessLock(validated_path)
+        if not access_lock.acquire_shared(timeout_sec=0.1):
+            if drain_wait_timeout > 0:
+                if not access_lock.acquire_shared(timeout_sec=drain_wait_timeout):
+                    raise DatabaseDrainingError(
+                        f"Database '{validated_path}' is locked by active key rotation; "
+                        f"connection blocked."
+                    )
+            else:
+                raise DatabaseDrainingError(
+                    f"Database '{validated_path}' is locked by active key rotation."
+                )
+        access_lock.release()
 
     # Determine encryption enforcement
     require_encryption = False
@@ -740,6 +1839,7 @@ def create_connection(
                 path_str,
                 timeout=timeout_sec,
                 isolation_level=None,
+                check_same_thread=False,
                 factory=CoordinatedSQLCipherConnection if CoordinatedSQLCipherConnection is not None else sqlcipher3.Connection,
             )
             conn.row_factory = sqlcipher3.Row
@@ -773,6 +1873,7 @@ def create_connection(
                 path_str,
                 timeout=timeout_sec,
                 isolation_level=None,
+                check_same_thread=False,
                 factory=CoordinatedConnection,
             )
             conn.row_factory = sqlite3.Row
@@ -881,16 +1982,30 @@ def transaction(
     - Closes connection upon transaction exit if marked for draining.
     """
     db_path = ConnectionCoordinator.get_connection_db_path(conn)
-    if db_path and ConnectionCoordinator.is_draining(db_path):
-        raise DatabaseDrainingError(
-            f"Database '{db_path}' is draining for key rotation; new transactions are rejected."
-        )
+    access_lock: Optional[DatabaseAccessLock] = None
+    if db_path:
+        if ConnectionCoordinator.is_draining(db_path):
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' is draining for key rotation; new transactions are rejected."
+            )
+        access_lock = DatabaseAccessLock(db_path)
+        if not access_lock.acquire_shared(timeout_sec=0.2):
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' is locked by active key rotation; transaction rejected."
+            )
 
     if conn.in_transaction or ConnectionCoordinator._is_connection_in_transaction(conn):
+        if access_lock is not None:
+            access_lock.release()
         raise TransactionError(
             "Nested transaction rejected: A transaction is already active on this connection. "
             "Use sequential transaction boundaries or explicit savepoints."
         )
+
+    # Store the shared lock on the connection so inner execute() calls can detect it
+    # and reuse it rather than re-acquiring a second overlapping shared lock.
+    if access_lock is not None:
+        ConnectionCoordinator.set_connection_lock(conn, access_lock)
 
     ConnectionCoordinator.set_in_transaction(conn, True)
     begin_cmd = "BEGIN IMMEDIATE;" if immediate else "BEGIN;"
@@ -909,6 +2024,11 @@ def transaction(
     finally:
         ConnectionCoordinator.set_in_transaction(conn, False)
         cursor.close()
+        # clear_connection_lock releases the lock if it is still registered.
+        # cursor.execute("COMMIT;") / cursor.execute("ROLLBACK;") already call
+        # clear_connection_lock via the COMMIT/ROLLBACK detection path, so this
+        # is a safe no-op in the normal case and a guarantee in exception paths.
+        ConnectionCoordinator.clear_connection_lock(conn)
         if ConnectionCoordinator.is_marked_for_drain(conn):
             try:
                 conn.close()
@@ -926,10 +2046,21 @@ def assert_not_draining(conn: SQLiteConnection) -> None:
     (SEC-044-03 fix)
     """
     db_path = ConnectionCoordinator.get_connection_db_path(conn)
-    if db_path and ConnectionCoordinator.is_draining(db_path):
-        raise DatabaseDrainingError(
-            f"Database '{db_path}' is draining for key rotation; write rejected."
-        )
+    if db_path:
+        if ConnectionCoordinator.is_draining(db_path):
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' is draining for key rotation; write rejected."
+            )
+        # If the connection already holds a transaction-lifetime shared lock, the
+        # rotation exclusive lock cannot have been granted — no additional check needed.
+        if ConnectionCoordinator.get_connection_lock(conn) is not None:
+            return
+        access_lock = DatabaseAccessLock(db_path)
+        if not access_lock.acquire_shared(timeout_sec=0.1):
+            raise DatabaseDrainingError(
+                f"Database '{db_path}' is locked by active key rotation; write rejected."
+            )
+        access_lock.release()
 
 
 def migrate_database_to_encrypted(
@@ -1377,6 +2508,7 @@ def initialize_runtime_database(
     migrations_dir: Optional[Path | str] = None,
     encryption_key: Optional[bytes] = None,
     encrypted: Optional[bool] = None,
+    key_manager: Optional[Any] = None,
 ) -> SQLiteConnection:
     """Initialize, migrate, and encrypt the canonical SAGE SQLite database.
 
@@ -1414,14 +2546,19 @@ def initialize_runtime_database(
     active_key = encryption_key
     key_mgr: Optional[DatabaseKeyManager] = None
     if use_encryption and not is_memory:
-        key_mgr = DatabaseKeyManager()
+        key_mgr = key_manager or DatabaseKeyManager()
         if active_key is None:
             active_key = key_mgr.get_or_create_key()
 
+        # Wait if database is currently draining for an active rotation
+        if ConnectionCoordinator.is_draining(validated_path):
+            ConnectionCoordinator.wait_for_drain(validated_path, timeout=15.0)
+            if encryption_key is None:
+                active_key = key_mgr.get_key() or active_key
+
         # Check for and recover any interrupted key rotation prior to connecting.
-        # SEC-044-01 fix: acquire ExclusiveDatabaseLock before any recovery action so
-        # that a concurrently booting second process cannot race to delete staging files
-        # belonging to an ongoing rotation in another process.
+        # Acquire ExclusiveDatabaseLock before any recovery action and select the
+        # authoritative key under the protection of the lock.
         if validated_path.is_file():
             from src.security.database_key_rotation import (
                 ExclusiveDatabaseLock,
@@ -1438,21 +2575,53 @@ def initialize_runtime_database(
                             validated_path,
                             recovery_res,
                         )
-                        if encryption_key is None:
-                            active_key = key_mgr.get_key()
+                    # Always select authoritative key under lock protection (SEC-044-03 / Prompt 048 fix)
+                    if encryption_key is None:
+                        active_key = key_mgr.get_key() or key_mgr.get_or_create_key()
             except RotationLockError:
                 # Another process holds the rotation lock and is actively rotating;
                 # skip recovery here — the lock-holder is responsible for completion.
-                # Wait for drain to finish so we don't open with a stale pre-rotation key.
+                # Wait for drain to finish and reload the authoritative key.
                 logger.info(
                     "Skipping startup recovery for '%s': rotation lock held by another process. "
                     "Waiting for drain to complete before connecting.",
                     validated_path,
                 )
                 ConnectionCoordinator.wait_for_drain(validated_path, timeout=15.0)
-                # Reload the key in case rotation completed and committed a new key
                 if encryption_key is None:
                     active_key = key_mgr.get_key()
+
+        # Final key refresh immediately before connecting if caller did not supply explicit key
+        if encryption_key is None and key_mgr is not None:
+            active_key = key_mgr.get_key() or active_key
+
+        # Verify selected key against database if encrypted file exists (fail-closed pre-validation)
+        if (
+            active_key
+            and validated_path.is_file()
+            and is_database_encrypted(validated_path)
+        ):
+            hex_key = active_key.hex()
+            auth_ok = False
+            try:
+                test_conn = sqlcipher3.connect(str(validated_path), timeout=2.0)
+                test_conn.execute(f"PRAGMA key = \"x'{hex_key}'\";")
+                test_conn.execute("SELECT count(*) FROM sqlite_master;").fetchone()
+                test_conn.close()
+                auth_ok = True
+            except Exception:
+                auth_ok = False
+
+            if not auth_ok and key_mgr is not None:
+                # Key might have been rotated by another process immediately before connect;
+                # reload key under lock and retry verification.
+                try:
+                    with ExclusiveDatabaseLock(validated_path, timeout_sec=5.0):
+                        fresh_key = key_mgr.get_key()
+                        if fresh_key and fresh_key != active_key:
+                            active_key = fresh_key
+                except Exception:
+                    pass
 
     # If file exists on disk and is plaintext, migrate it before connecting
     if use_encryption and active_key and not is_memory and validated_path.is_file():

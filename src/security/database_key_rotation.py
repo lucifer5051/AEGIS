@@ -298,13 +298,21 @@ def rotate_database_key(
     with ExclusiveDatabaseLock(validated_path, timeout_sec=timeout_sec):
         from src.storage.database import (
             ConnectionCoordinator,
+            DatabaseAccessLock,
             can_acquire_exclusive_file_access,
         )
 
-        # 2. Drain connections across threads and processes
-        ConnectionCoordinator.drain(validated_path, timeout_sec=drain_timeout_sec)
+        access_lock = DatabaseAccessLock(validated_path)
 
         try:
+            # 2. Drain connections across threads and processes
+            ConnectionCoordinator.drain(validated_path, timeout_sec=drain_timeout_sec)
+
+            # 2.5 Acquire OS-level cross-process exclusive access lock across the critical section
+            if not access_lock.acquire_exclusive(timeout_sec=timeout_sec):
+                raise RotationLockError(
+                    f"Timed out waiting for exclusive database access lock on '{validated_path}'."
+                )
             # 3. Check for and recover any interrupted rotation
             if journal.exists():
                 recovery_info = recover_interrupted_rotation(
@@ -507,6 +515,36 @@ def rotate_database_key(
             # 7.5 Pre-swap verification: ensure no writes slipped in on active database
             # SEC-044-02 & SEC-044-06: compare SHA-256 schema and row-content fingerprints
             # to detect INSERT, DELETE, UPDATE, DDL, and trigger mutations.
+            wal_file = validated_path.with_name(f"{validated_path.name}-wal")
+
+            # Checkpoint WAL and ensure no uncheckpointed frames remain
+            wal_conn = None
+            try:
+                wal_conn = sqlcipher3.connect(str(validated_path))
+                wal_conn.execute(f"PRAGMA key = \"x'{hex_old_key}'\";")
+                wal_chk = wal_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
+                if wal_chk is not None and wal_chk[0] == 1:
+                    raise RotationError(f"WAL checkpoint busy before swap (busy=1): {wal_chk}")
+            finally:
+                if wal_conn is not None:
+                    try:
+                        wal_conn.close()
+                    except Exception:
+                        pass
+
+            # Abort if WAL has uncheckpointed data
+            if wal_file.is_file() and wal_file.stat().st_size > 0:
+                if staging_db_file.exists():
+                    try:
+                        staging_db_file.unlink()
+                    except Exception:
+                        pass
+                journal.delete()
+                raise RotationError(
+                    f"WAL file has uncheckpointed data ({wal_file.stat().st_size} bytes). Aborting swap."
+                )
+
+            # Parity verification
             current_counts = _collect_database_parity(validated_path, current_key)
             if current_counts != baseline_counts:
                 if staging_db_file.exists():
@@ -521,7 +559,17 @@ def rotate_database_key(
                 )
 
             # Validate that no external process holds an open handle before key commitment
-            if not can_acquire_exclusive_file_access(validated_path):
+            exclusive_acquired = False
+            exclusive_start = time.time()
+            exclusive_timeout = min(5.0, drain_timeout_sec)
+            while time.time() - exclusive_start < exclusive_timeout:
+                if can_acquire_exclusive_file_access(validated_path):
+                    if not wal_file.is_file() or can_acquire_exclusive_file_access(wal_file):
+                        exclusive_acquired = True
+                        break
+                time.sleep(0.05)
+
+            if not exclusive_acquired:
                 if staging_db_file.exists():
                     try:
                         staging_db_file.unlink()
@@ -531,6 +579,9 @@ def rotate_database_key(
                 raise RotationError(
                     f"Cannot acquire exclusive file access to '{validated_path}' before database swap."
                 )
+
+            pre_swap_mtime_ns = validated_path.stat().st_mtime_ns
+            pre_swap_size = validated_path.stat().st_size
 
             # 8. Key state publication
             current_version = mgr.get_current_version()
@@ -545,23 +596,58 @@ def rotate_database_key(
             )
 
             # 9. Database publication
+            # Pre-replace invariant check immediately prior to os.replace
             post_conn = None
             try:
                 replace_attempts = 5
                 for attempt in range(replace_attempts):
+                    # Re-verify invariant before every replacement attempt
+                    current_mtime = validated_path.stat().st_mtime_ns
+                    current_size = validated_path.stat().st_size
+                    current_wal = wal_file.stat().st_size if wal_file.is_file() else 0
+                    if (
+                        current_mtime != pre_swap_mtime_ns
+                        or current_size != pre_swap_size
+                        or current_wal > 0
+                    ):
+                        mgr.rollback_key(current_version)
+                        if staging_db_file.exists():
+                            try:
+                                staging_db_file.unlink()
+                            except Exception:
+                                pass
+                        journal.delete()
+                        raise RotationError(
+                            f"Active database was modified immediately prior to swap. "
+                            f"Key rolled back to version {current_version}; rotation aborted."
+                        )
+
                     try:
                         os.replace(staging_db_file, validated_path)
                         break
                     except PermissionError:
                         if attempt == replace_attempts - 1:
-                            raise
+                            mgr.rollback_key(current_version)
+                            if staging_db_file.exists():
+                                try:
+                                    staging_db_file.unlink()
+                                except Exception:
+                                    pass
+                            journal.delete()
+                            raise RotationError(
+                                f"Cannot replace database file '{validated_path}': file is open by another process. "
+                                f"Key rolled back to version {current_version}; rotation aborted fail-closed."
+                            )
                         time.sleep(0.05 * (2 ** attempt))
 
-                # Remove leftover WAL and SHM files from the source database
+                # Remove leftover 0-byte WAL and SHM files from the source database
                 for ext in ("-wal", "-shm"):
                     lingering = validated_path.with_name(f"{validated_path.name}{ext}")
                     if lingering.exists():
                         try:
+                            if ext == "-wal" and lingering.stat().st_size > 0:
+                                logger.warning("Retaining non-empty WAL file '%s'", lingering)
+                                continue
                             lingering.unlink()
                         except Exception:
                             pass
@@ -578,6 +664,8 @@ def rotate_database_key(
                 journal.record_state(RotationState.DATABASE_COMMITTED)
                 logger.info("Published re-keyed database at '%s'", validated_path)
 
+            except RotationError:
+                raise
             except Exception as exc:
                 # Fatal error during publication: trigger immediate recovery
                 logger.critical("Fatal error publishing re-keyed database: %s", exc)
@@ -631,6 +719,7 @@ def rotate_database_key(
                 "new_key": fresh_key,
             }
         finally:
+            access_lock.release()
             ConnectionCoordinator.release_drain(validated_path)
 
 
@@ -894,14 +983,19 @@ def _collect_database_parity(db_path: Path, key: bytes) -> Dict[str, str]:
                 for col in conn.execute(f'PRAGMA table_info("{tbl}");').fetchall()
             ]
             order_clause = f"ORDER BY {', '.join(cols)}" if cols else ""
-            for data_row in conn.execute(
-                f'SELECT * FROM "{tbl}" {order_clause};'
-            ).fetchall():
-                rh.update(
-                    ("|".join("" if v is None else str(v) for v in data_row) + "\n").encode(
-                        "utf-8"
-                    )
-                )
+            cursor = conn.execute(f'SELECT * FROM "{tbl}" {order_clause};')
+            for data_row in cursor:
+                # Use length prefixing to eliminate delimiter collision
+                parts = []
+                for v in data_row:
+                    if v is None:
+                        parts.append("-1:N")
+                    elif isinstance(v, bytes):
+                        parts.append(f"{len(v)}:B{v.hex()}")
+                    else:
+                        s = str(v)
+                        parts.append(f"{len(s)}:S{s}")
+                rh.update(",".join(parts).encode("utf-8") + b"\n")
             parity[tbl] = f"{row_count}:{rh.hexdigest()}"
     finally:
         try:

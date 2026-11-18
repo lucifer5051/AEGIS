@@ -19,9 +19,16 @@ Core Invariants:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Sequence
+from uuid import uuid4
 
 from src.decision.models import FastDecisionRequest, RequestContext
+from src.decision.routing import (
+    ExecutionRouter,
+    ExecutionStrategy,
+    RoutingDecision,
+)
 from src.decision.service import FastDecisionService
 from src.manager.briefing import (
     ConfirmationGate,
@@ -29,7 +36,7 @@ from src.manager.briefing import (
     ExecutionBudget,
     ProvenanceType,
 )
-from src.manager.context import ContextAssembler
+from src.manager.context import ContextAssembler, ContextIR
 from src.manager.errors import (
     StepNotFoundError,
     TaskNotFoundError,
@@ -43,7 +50,7 @@ from src.manager.models import (
     TaskRecord,
     TaskState,
 )
-from src.manager.observation import StepObservation
+from src.manager.observation import ObservationStatus, StepObservation
 from src.manager.persistent_engine import PersistentExecutionEngine
 from src.manager.planner import PlanValidationError, StructuredPlanner
 from src.manager.research import (
@@ -52,7 +59,12 @@ from src.manager.research import (
     ResearchProvider,
 )
 from src.manager.state_store import StateStore
-from src.manager.synthesis import TaskSynthesizer
+from src.manager.synthesis import (
+    SynthesisDegradationPolicy,
+    SynthesisError,
+    SynthesisResult,
+    TaskSynthesizer,
+)
 from src.manager.verifier import StepVerifier, VerificationOutcome
 from src.reasoning.base import LocalReasoningProvider
 from src.tools.broker import ToolBroker
@@ -67,6 +79,9 @@ class Supervisor:
 
     # Max retry attempts for idempotent steps
     MAX_STEP_RETRIES = 2
+    # Bounded observation-driven replan limits
+    MAX_REPLAN_ATTEMPTS = 3
+    MAX_TOTAL_EXECUTED_STEPS = 20
 
     def __init__(
         self,
@@ -86,41 +101,135 @@ class Supervisor:
         memory_store: Optional[Any] = None,
         retriever: Optional[Any] = None,
         lesson_manager: Optional[Any] = None,
+        unified_memory: Optional[Any] = None,
+        config_manager: Optional[Any] = None,
         confirmation_gate: Optional[ConfirmationGate] = None,
         persistent_engine: Optional[PersistentExecutionEngine] = None,
         research_provider: Optional[ResearchProvider] = None,
         notification_manager: Optional[Any] = None,
+        reasoning_providers: Optional[Dict[str, LocalReasoningProvider]] = None,
+        model_gateway: Optional[Any] = None,
+        strict_synthesis: bool = False,
+        synthesis_policy: Optional[SynthesisDegradationPolicy] = None,
     ) -> None:
         """Initialize supervisor with required subsystems."""
         self._store = state_store
         self._authority = trust_authority
         self._tools = tool_broker
         self._decision = fast_decision
+        self._model_gateway = model_gateway
         self._reasoning_provider = reasoning_provider
+        self._reasoning_providers = dict(reasoning_providers) if reasoning_providers else {}
+        if self._reasoning_provider is None and self._model_gateway is not None:
+            try:
+                from src.models.provider_adapter import GatewayReasoningProvider
+                self._reasoning_provider = GatewayReasoningProvider(self._model_gateway)
+            except Exception:
+                pass
         self._planner = planner or (
-            StructuredPlanner(reasoning_provider) if reasoning_provider else None
+            StructuredPlanner(self._reasoning_provider) if self._reasoning_provider else None
         )
         self._verifier = verifier or StepVerifier()
+        self._strict_synthesis = strict_synthesis
         self._synthesizer = synthesizer or (
-            TaskSynthesizer(reasoning_provider) if reasoning_provider else None
+            TaskSynthesizer(self._reasoning_provider) if self._reasoning_provider else None
         )
+        if self._synthesizer is not None:
+            if synthesis_policy is not None:
+                self._synthesizer.policy = synthesis_policy
+            elif strict_synthesis:
+                self._synthesizer.policy = SynthesisDegradationPolicy.STRICT
         self._memory_store = memory_store
         self._retriever = retriever
         self._lesson_manager = lesson_manager
+        self._unified_memory = unified_memory
+        self._config_manager = config_manager
+
+        # Auto-wire memory & experience subsystems if conn available and not explicitly provided
+        conn = getattr(state_store, "_conn", None) if state_store else None
+        if self._config_manager is None:
+            try:
+                from src.config.manager import SageConfigurationManager
+
+                self._config_manager = SageConfigurationManager(
+                    conn=conn,
+                    trustcore_policy=getattr(self._authority, "_policy", None),
+                )
+            except Exception:
+                self._config_manager = None
+
+        if self._unified_memory is None and conn is not None:
+            try:
+                from src.memory.engine import UnifiedMemoryEngine
+
+                self._unified_memory = UnifiedMemoryEngine(conn)
+            except Exception:
+                self._unified_memory = None
+
+        if self._memory_store is None and conn is not None:
+            try:
+                from src.memory.store import EKMMemoryStore
+
+                self._memory_store = EKMMemoryStore(conn)
+            except Exception:
+                pass
+
+        if self._lesson_manager is None and conn is not None:
+            try:
+                from src.memory.lessons import LessonManager
+
+                self._lesson_manager = LessonManager(conn, memory_store=self._memory_store)
+            except Exception:
+                pass
+
+        if experience_service is not None:
+            self._experience_service = experience_service
+        elif conn is not None:
+            try:
+                from src.skills.experience import ExperienceFeedbackService
+
+                self._experience_service = ExperienceFeedbackService(
+                    conn=conn,
+                    memory_store=self._memory_store,
+                    unified_memory=self._unified_memory,
+                )
+            except Exception:
+                self._experience_service = None
+        else:
+            self._experience_service = None
+
+        if self._retriever is None and self._memory_store is not None:
+            try:
+                from src.memory.retriever import EKMRetriever
+
+                self._retriever = EKMRetriever(
+                    self._memory_store, lesson_manager=self._lesson_manager
+                )
+            except Exception:
+                pass
+
         if context_assembler is not None:
             self._context_assembler = context_assembler
-        elif memory_store is not None or retriever is not None or lesson_manager is not None:
-            self._context_assembler = ContextAssembler(
-                memory_store=memory_store,
-                retriever=retriever,
-                lesson_manager=lesson_manager,
-            )
         else:
-            self._context_assembler = ContextAssembler()
+            self._context_assembler = ContextAssembler(
+                conn=conn,
+                memory_store=self._memory_store,
+                retriever=self._retriever,
+                lesson_manager=self._lesson_manager,
+                unified_memory=self._unified_memory,
+            )
         self._skill_registry = skill_registry
+        self._router = ExecutionRouter(
+            skill_registry=self._skill_registry,
+            reasoning_providers=self._reasoning_providers,
+            default_provider_id=(
+                getattr(reasoning_provider, "provider_id", "default")
+                if reasoning_provider
+                else None
+            ),
+        )
         self._clarification_gate = clarification_gate
         self._admission_controller = admission_controller
-        self._experience_service = experience_service
         self._notifications = notification_manager
         self._confirmation_gate = confirmation_gate or ConfirmationGate(
             context_assembler=self._context_assembler,
@@ -142,6 +251,12 @@ class Supervisor:
             notification_manager=notification_manager,
             experience_service=self._experience_service,
         )
+
+    @property
+    def router(self) -> ExecutionRouter:
+        """Return the active ExecutionRouter."""
+        return self._router
+
 
     @property
     def context_assembler(self) -> ContextAssembler:
@@ -167,6 +282,98 @@ class Supervisor:
     def lesson_manager(self) -> Optional[Any]:
         """Return the active LessonManager, if configured."""
         return self._lesson_manager
+
+    @property
+    def experience_service(self) -> Optional[Any]:
+        """Return the active ExperienceFeedbackService, if configured."""
+        return self._experience_service
+
+    @property
+    def retriever(self) -> Optional[Any]:
+        """Return the active EKMRetriever, if configured."""
+        return self._retriever
+
+    @property
+    def synthesizer(self) -> Optional[TaskSynthesizer]:
+        """Return the active TaskSynthesizer, if configured."""
+        return self._synthesizer
+
+    def _record_goal_experience(
+        self,
+        task: Optional[TaskRecord],
+        goal_text: str,
+        success: bool,
+        completed_steps: Sequence[Dict[str, Any]],
+        error_summary: Optional[str] = None,
+        project_id: Optional[str] = None,
+        latency_ms: float = 0.0,
+        skill_id: Optional[str] = None,
+        synthesis_degraded: bool = False,
+        synthesis_error: Optional[str] = None,
+    ) -> Optional[Any]:
+        """Record an ExperienceEvent upon task completion or terminal failure."""
+        from src.skills.experience import ExperienceEvent, ExperienceOutcomeType
+
+        task_id = task.task_id if task else str(uuid4())
+        tools_used = tuple(str(s.get("tool", "")) for s in completed_steps if s.get("tool"))
+        path = tuple(
+            f"{s.get('tool', '')}:{s.get('description', '')}"
+            for s in completed_steps
+            if s.get("tool")
+        )
+
+        outcome = (
+            ExperienceOutcomeType.VERIFIED_SUCCESS
+            if success
+            else ExperienceOutcomeType.EXECUTION_FAILURE
+        )
+
+        err_info = error_summary if not success else None
+        if synthesis_degraded:
+            degraded_tag = f"[DEGRADED_SYNTHESIS] {synthesis_error or 'Deterministic fallback substituted'}"
+            err_info = f"{err_info}; {degraded_tag}" if err_info else degraded_tag
+
+        if self._experience_service is None:
+            if self._unified_memory is not None:
+                try:
+                    self._unified_memory.record_task_outcome(
+                        task_id=task_id,
+                        intent=goal_text,
+                        success=success,
+                        details=f"Tools: {list(tools_used)}; Outcome: {outcome.value}; Latency: {latency_ms:.1f}ms",
+                        error=err_info if not success else None,
+                        project_id=project_id,
+                        actor="supervisor",
+                    )
+                except Exception as exc:
+                    logger.debug("Direct unified memory recording failed: %s", exc)
+            return None
+
+        conf = 1.0 if success else 0.5
+        if synthesis_degraded and success:
+            conf = 0.8  # Reflect slight degradation in user-facing synthesis fidelity
+
+        event = ExperienceEvent(
+            task_id=task_id,
+            invocation_id=str(uuid4()),
+            skill_id=skill_id or "supervisor.goal_execution",
+            intent=goal_text,
+            selected_tools=tools_used,
+            execution_path=path,
+            verification_result="VERIFIED" if success else "FAILED",
+            outcome_type=outcome,
+            latency_ms=max(0.0, latency_ms),
+            error_or_recovery_info=err_info,
+            project_id=project_id,
+            provenance="sage.manager.supervisor",
+            confidence=conf,
+        )
+        try:
+            self._experience_service.record_event(event)
+            return event
+        except Exception as exc:
+            logger.warning("Recording goal experience failed non-blockingly: %s", exc)
+            return None
 
     def assemble_context(
         self,
@@ -195,14 +402,16 @@ class Supervisor:
         priority: int = 100,
         metadata: Optional[Dict[str, Any]] = None,
         execution_mode: Optional[Any] = None,
+        routing_intent: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+        root_task_id: Optional[str] = None,
     ) -> TaskRecord:
         """Submit a user goal into the system, creating a durable task in SUBMITTED state.
 
         Advisory intent classification is optionally queried via FastDecisionService,
         preserving the advisory-only invariant.
         """
-        routing_intent: Optional[str] = None
-        if self._decision is not None:
+        if routing_intent is None and self._decision is not None:
             try:
                 decision_req = FastDecisionRequest(
                     user_input=goal_text,
@@ -218,6 +427,7 @@ class Supervisor:
             except Exception as exc:
                 logger.warning("Advisory Fast Decision evaluation skipped: %s", exc)
 
+
         task = self._store.create_task(
             title=goal_text,
             session_id=session_id,
@@ -226,12 +436,15 @@ class Supervisor:
             routing_intent=routing_intent,
             metadata=metadata,
             execution_mode=execution_mode,
+            parent_task_id=parent_task_id,
+            root_task_id=root_task_id,
         )
         logger.info(
-            "Goal submitted: task_id=%r, routing_intent=%r, mode=%s",
+            "Goal submitted: task_id=%r, routing_intent=%r, mode=%s, parent_task_id=%r",
             task.task_id,
             routing_intent,
             task.execution_mode.value,
+            task.parent_task_id,
         )
         return task
 
@@ -243,6 +456,8 @@ class Supervisor:
         priority: int = 100,
         metadata: Optional[Dict[str, Any]] = None,
         execution_mode: Optional[Any] = None,
+        parent_task_id: Optional[str] = None,
+        root_task_id: Optional[str] = None,
     ) -> TaskRecord:
         """Alias for submit_goal to create a durable task."""
         return self.submit_goal(
@@ -250,6 +465,27 @@ class Supervisor:
             session_id=session_id,
             project_id=project_id,
             priority=priority,
+            metadata=metadata,
+            execution_mode=execution_mode,
+            parent_task_id=parent_task_id,
+            root_task_id=root_task_id,
+        )
+
+    def create_subtask(
+        self,
+        parent_task_id: str,
+        title: str,
+        priority: int = 100,
+        routing_intent: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        execution_mode: Optional[Any] = None,
+    ) -> TaskRecord:
+        """Create a child subtask explicitly linked to a parent task and its root lineage."""
+        return self._store.create_task(
+            title=title,
+            parent_task_id=parent_task_id,
+            priority=priority,
+            routing_intent=routing_intent,
             metadata=metadata,
             execution_mode=execution_mode,
         )
@@ -701,12 +937,16 @@ class Supervisor:
         project_id: Optional[str] = None,
         session_id: Optional[str] = None,
         additional_constraints: Optional[Sequence[str]] = None,
+        max_replan_attempts: Optional[int] = None,
+        max_total_steps: Optional[int] = None,
+        mode: Optional[str] = None,
+        task_overrides: Optional[Dict[str, Any]] = None,
     ) -> "GoalExecutionResult":
-        """Execute a natural-language goal end-to-end through the agent loop.
+        """Execute a natural-language goal end-to-end through the bounded agent loop.
 
-        USER GOAL → CONTEXT (ContextIR) → QWEN LOCAL REASONING → VALIDATED PLAN
+        USER GOAL → CONTEXT (ContextIR) → LOCAL REASONING → VALIDATED PLAN
             → SUPERVISOR → TRUST CORE → TOOL BROKER → OBSERVATION
-            → VERIFICATION → RETRY/REPLAN → SYNTHESIS → USER RESULT
+            → VERIFICATION → BOUNDED REPLAN / RETRY → SYNTHESIS → USER RESULT
 
         Args:
             goal_text:    Natural language user goal.
@@ -714,6 +954,8 @@ class Supervisor:
             project_id:   Optional project scope.
             session_id:   Optional session ID.
             additional_constraints: Optional extra safety constraints injected into ContextIR.
+            max_replan_attempts: Maximum allowed observation-driven replans (defaults to MAX_REPLAN_ATTEMPTS).
+            max_total_steps: Maximum total tool execution steps allowed across all attempts.
 
         Returns:
             GoalExecutionResult with task record, synthesis, and observations.
@@ -736,41 +978,270 @@ class Supervisor:
                     synthesis=f"Clarification required: {clar.clarification_prompt}",
                     task_record=None,
                     observations=[],
+                    routing_decision=None,
                 )
 
-        if self._planner is None:
+        t_start = time.perf_counter()
+
+        # Resolve effective configuration & apply profile bounds
+        effective_cfg = None
+        if self._config_manager is not None:
+            try:
+                effective_cfg = self._config_manager.resolve_config(
+                    task_overrides=task_overrides,
+                    active_mode=mode,
+                )
+                if max_replan_attempts is None and effective_cfg:
+                    max_replan_attempts = effective_cfg.execution_profile.max_replan_attempts
+                if max_total_steps is None and effective_cfg:
+                    max_total_steps = effective_cfg.execution_profile.max_total_steps
+            except Exception as exc:
+                logger.debug("Supervisor config resolution fallback: %s", exc)
+
+        # Preflight lesson retrieval for advisory routing awareness
+        preflight_lessons = []
+        if hasattr(self._context_assembler, "retrieve_relevant_lessons"):
+            try:
+                preflight_lessons = self._context_assembler.retrieve_relevant_lessons(
+                    goal=goal_text,
+                    project_id=project_id,
+                    limit=5,
+                )
+            except Exception as exc:
+                logger.debug("Preflight lesson retrieval error: %s", exc)
+
+        lesson_triggers = (
+            [les.trigger_condition for les in preflight_lessons]
+            if preflight_lessons
+            else None
+        )
+
+        # 1. FAST DECISION & RUNTIME ROUTING RESOLUTION
+        eval_result: Optional[FastDecisionResult] = None
+        if self._decision is not None:
+            try:
+                decision_req = FastDecisionRequest(
+                    user_input=goal_text,
+                    context=RequestContext(
+                        project_scope=project_id,
+                        active_lessons=lesson_triggers,
+                    ),
+                )
+                eval_result = self._decision.evaluate(decision_req)
+            except Exception as exc:
+                logger.warning("FastDecision evaluation failed; falling back: %s", exc)
+                eval_result = None
+
+        routing_decision, selected_provider, blocking_error = self._router.route(
+            goal_text=goal_text,
+            decision=eval_result,
+            default_provider=self._reasoning_provider,
+            lessons=preflight_lessons,
+        )
+
+        if blocking_error is not None:
+            logger.error("Execution blocked by routing layer: %s", blocking_error)
+            # Preserve original RuntimeError contract: when absolutely no provider/planner
+            # is configured (not a temporary unavailability), raise RuntimeError so callers
+            # get an actionable configuration error rather than a silent failure result.
+            _no_config = (
+                self._reasoning_provider is None
+                and not self._router._providers
+                and self._planner is None
+                and "No reasoning providers configured" in blocking_error
+            )
+            if _no_config:
+                raise RuntimeError(
+                    "No reasoning provider/planner configured. "
+                    "Provide a LocalReasoningProvider when constructing Supervisor."
+                )
+            elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+            self._record_goal_experience(
+                task=None,
+                goal_text=goal_text,
+                success=False,
+                completed_steps=[],
+                error_summary=blocking_error,
+                project_id=project_id,
+                latency_ms=elapsed_ms,
+            )
+            return GoalExecutionResult(
+                goal_text=goal_text,
+                success=False,
+                synthesis=f"Execution blocked: {blocking_error}",
+                task_record=None,
+                observations=[],
+                routing_decision=routing_decision,
+            )
+
+        strategy_str = (
+            routing_decision.strategy.value
+            if hasattr(routing_decision.strategy, "value")
+            else str(routing_decision.strategy)
+        )
+        route_str = (
+            routing_decision.route.value
+            if hasattr(routing_decision.route, "value")
+            else str(routing_decision.route)
+        )
+
+        # 2. STRATEGY DISPATCH: DIRECT_SKILL (Fast-path deterministic execution)
+        if (
+            strategy_str == ExecutionStrategy.DIRECT_SKILL.value
+            and routing_decision.selected_skill_id is not None
+        ):
+            logger.info(
+                "Executing goal via direct skill '%s' based on fast decision '%s' (conf=%.2f)",
+                routing_decision.selected_skill_id,
+                route_str,
+                routing_decision.confidence,
+            )
+            meta = {
+                "routing_decision": routing_decision.model_dump(),
+                "execution_strategy": strategy_str,
+            }
+            task = self.submit_goal(
+                goal_text=goal_text,
+                session_id=session_id,
+                project_id=project_id,
+                metadata=meta,
+                routing_intent=route_str,
+            )
+            self._store.transition_task_state(task.task_id, TaskState.PLANNING)
+            self._store.transition_task_state(task.task_id, TaskState.EXECUTING)
+
+            from src.skills.models import SkillExecutionStatus, SkillInvocation
+            skill_input: Dict[str, Any] = {"goal": goal_text, "text": goal_text, "query": goal_text}
+            invocation = SkillInvocation(
+                skill_id=routing_decision.selected_skill_id,
+                input=skill_input,
+                task_id=task.task_id,
+            )
+            try:
+                skill_result = self.execute_skill(
+                    invocation=invocation,
+                    actor=actor,
+                    project_id=project_id,
+                    parent_task_id=task.task_id,
+                    root_task_id=task.root_task_id or task.task_id,
+                )
+            except Exception as exc:
+                logger.error("Direct skill execution failed for task %s: %s", task.task_id, exc)
+                final_task = self._store.transition_task_state(
+                    task.task_id,
+                    TaskState.FAILED,
+                    error_summary=str(exc),
+                )
+                return GoalExecutionResult(
+                    goal_text=goal_text,
+                    success=False,
+                    synthesis=f"Direct skill execution failed: {exc}",
+                    task_record=final_task,
+                    observations=[],
+                    routing_decision=routing_decision,
+                )
+
+            if skill_result.status == SkillExecutionStatus.SUCCESS:
+                final_task = self._store.transition_task_state(task.task_id, TaskState.COMPLETED)
+                obs_out = (
+                    str(skill_result.output)
+                    if skill_result.output is not None
+                    else "Skill completed successfully."
+                )
+                skill_obs = StepObservation(
+                    step_number=1,
+                    tool_name=f"skill:{routing_decision.selected_skill_id}",
+                    status=ObservationStatus.SUCCESS,
+                    output_summary=obs_out,
+                    raw_output=obs_out,
+                )
+
+                return GoalExecutionResult(
+                    goal_text=goal_text,
+                    success=True,
+                    synthesis=f"Task completed directly via skill '{routing_decision.selected_skill_id}': {obs_out}",
+                    task_record=final_task,
+                    observations=[skill_obs],
+                    routing_decision=routing_decision,
+                )
+            else:
+                final_task = self._store.transition_task_state(
+                    task.task_id,
+                    TaskState.FAILED,
+                    error_summary=skill_result.error or "Skill execution did not succeed",
+                )
+                return GoalExecutionResult(
+                    goal_text=goal_text,
+                    success=False,
+                    synthesis=f"Direct skill execution failed: {skill_result.error}",
+                    task_record=final_task,
+                    observations=[],
+                    routing_decision=routing_decision,
+                )
+
+        # 3. STRATEGY DISPATCH: STRUCTURED_PLAN / RESEARCH_RETRIEVAL
+        active_provider = selected_provider or self._reasoning_provider
+        if active_provider is not None:
+            if self._planner is not None and self._planner.provider == active_provider:
+                planner = self._planner
+            else:
+                planner = StructuredPlanner(active_provider)
+        else:
+            planner = self._planner
+
+        if planner is None:
             raise RuntimeError(
                 "No reasoning provider/planner configured. "
                 "Provide a LocalReasoningProvider when constructing Supervisor."
             )
 
         constraints = list(additional_constraints) if additional_constraints else []
+        constraints.append(
+            f"Routing Strategy: {strategy_str} | Intent: {route_str}"
+        )
 
-        # 1. CONTEXT ASSEMBLY
+        # CONTEXT ASSEMBLY
         context_ir = self._context_assembler.assemble(
             goal=goal_text,
             project_id=project_id,
             additional_constraints=constraints if constraints else None,
         )
 
-        # 2. PLANNING (with one internal repair attempt)
+        # PLANNING (with one internal repair attempt)
         try:
-            plan = self._planner.generate_plan(context_ir, self._tools)
+            plan = planner.generate_plan(context_ir, self._tools)
         except PlanValidationError as exc:
             logger.error("Planning failed for goal %r: %s", goal_text, exc)
+            elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+            self._record_goal_experience(
+                task=None,
+                goal_text=goal_text,
+                success=False,
+                completed_steps=[],
+                error_summary=f"Planning failed: {exc}",
+                project_id=project_id,
+                latency_ms=elapsed_ms,
+            )
             return GoalExecutionResult(
                 goal_text=goal_text,
                 success=False,
                 synthesis=f"Planning failed: {exc}",
                 task_record=None,
                 observations=[],
+                routing_decision=routing_decision,
             )
 
-        # 3. SUBMIT + PERSIST TASK
+        # SUBMIT + PERSIST TASK
+        task_meta = {
+            "routing_decision": routing_decision.model_dump(),
+            "execution_strategy": strategy_str,
+        }
         task = self.submit_goal(
             goal_text=goal_text,
             session_id=session_id,
             project_id=project_id,
+            metadata=task_meta,
+            routing_intent=route_str,
         )
 
         # Convert Plan steps → StepPlan records and persist
@@ -785,16 +1256,179 @@ class Supervisor:
         ]
         task = self.plan_task(task.task_id, step_plans)
 
-        # 4. EXECUTION LOOP with observation + verification + bounded retry
+        # 4. BOUNDED OBSERVATION-DRIVEN EXECUTION LOOP
+        max_replan = (
+            max_replan_attempts
+            if max_replan_attempts is not None
+            else self.MAX_REPLAN_ATTEMPTS
+        )
+        max_steps = (
+            max_total_steps
+            if max_total_steps is not None
+            else self.MAX_TOTAL_EXECUTED_STEPS
+        )
+
         all_observations: list[StepObservation] = []
         all_verifications = []
-        steps = self._store.list_task_steps(task.task_id)
+        completed_steps: list[dict[str, Any]] = []
+        uncertain_operations: list[dict[str, Any]] = []
+        replan_count = 0
+        total_steps_executed = 0
 
-        for step_record, planned_step in zip(steps, plan.steps, strict=False):
+        steps = self._store.list_task_steps(task.task_id)
+        execution_queue: list[tuple[StepRecord, Any]] = list(
+            zip(steps, plan.steps, strict=False)
+        )
+
+        while execution_queue:
+            step_record, planned_step = execution_queue.pop(0)
+
+            # Step budget limit check
+            if total_steps_executed >= max_steps:
+                self._store.transition_step_state(
+                    step_record.step_id,
+                    StepState.FAILED,
+                    result_summary=f"Total step execution budget ({max_steps}) exhausted.",
+                )
+                final_task = self._store.transition_task_state(
+                    task.task_id,
+                    TaskState.FAILED,
+                    error_summary=f"Execution budget exhausted: reached maximum total steps ({max_steps}).",
+                )
+                return GoalExecutionResult(
+                    goal_text=goal_text,
+                    success=False,
+                    synthesis=f"Execution halted: Reached execution budget limit ({max_steps} total steps).",
+                    task_record=final_task,
+                    observations=all_observations,
+                )
+
+            # Duplicate-action prevention: never blindly repeat completed non-idempotent operations
+            is_duplicate_completed = False
+            for comp in completed_steps:
+                if (
+                    comp.get("tool") == planned_step.tool
+                    and comp.get("arguments") == dict(planned_step.arguments)
+                    and not planned_step.is_idempotent
+                ):
+                    is_duplicate_completed = True
+                    logger.warning(
+                        "Preventing duplicate non-idempotent action '%s': reusing previous verified result.",
+                        planned_step.tool,
+                    )
+                    self._store.transition_step_state(
+                        step_record.step_id,
+                        StepState.COMPLETED,
+                        result_summary=f"Reused verified result: {comp.get('result_summary')}",
+                    )
+                    break
+            if is_duplicate_completed:
+                continue
+
+            # Uncertain side-effect check: do not repeat ambiguous non-idempotent side effects
+            is_uncertain_repeat = False
+            for unc in uncertain_operations:
+                if (
+                    unc.get("tool") == planned_step.tool
+                    and unc.get("arguments") == dict(planned_step.arguments)
+                    and not planned_step.is_idempotent
+                ):
+                    is_uncertain_repeat = True
+                    break
+            if is_uncertain_repeat:
+                self._store.transition_step_state(
+                    step_record.step_id,
+                    StepState.FAILED,
+                    result_summary="Cannot repeat non-idempotent action with uncertain outcome without external state verification.",
+                )
+                final_task = self._store.transition_task_state(
+                    task.task_id,
+                    TaskState.FAILED,
+                    error_summary="Cannot repeat non-idempotent action with uncertain outcome without external state verification.",
+                )
+                return GoalExecutionResult(
+                    goal_text=goal_text,
+                    success=False,
+                    synthesis="Execution halted: Attempted to repeat a non-idempotent side-effecting action with an uncertain outcome without external verification.",
+                    task_record=final_task,
+                    observations=all_observations,
+                )
+
+            # Step execution with bounded idempotent retry
             retry_count = 0
             while True:
+                total_steps_executed += 1
                 self._store.transition_step_state(step_record.step_id, StepState.RUNNING)
-                # Invoke through ToolBroker (Trust Core validates inside)
+
+                # Pre-execution durable checkpoint
+                existing_cps = self._store.list_checkpoints(task.task_id)
+                self._store.create_checkpoint(
+                    task_id=task.task_id,
+                    step_id=step_record.step_id,
+                    checkpoint_seq=len(existing_cps) + 1,
+                    snapshot={
+                        "event": "PRE_EXECUTION",
+                        "step_index": step_record.step_index,
+                        "tool": planned_step.tool,
+                    },
+                )
+
+                # Central Policy Evaluation check before tool execution
+                if self._config_manager is not None:
+                    from src.config.policy_models import (
+                        PolicyEvaluationDecisionType,
+                        PolicyEvaluationRequest,
+                    )
+
+                    tool_defn = (
+                        self._tools.get_definition(planned_step.tool)
+                        if hasattr(self._tools, "get_definition")
+                        else None
+                    )
+                    action_name = (
+                        tool_defn.action_name
+                        if tool_defn
+                        else f"tool.{planned_step.tool}"
+                    )
+                    target_res = planned_step.arguments.get(
+                        "path"
+                    ) or planned_step.arguments.get("target")
+
+                    eval_req = PolicyEvaluationRequest(
+                        action_name=action_name,
+                        tool_name=planned_step.tool,
+                        actor=actor,
+                        project_id=project_id,
+                        target_resource=str(target_res) if target_res else None,
+                        arguments=dict(planned_step.arguments),
+                        active_mode=mode,
+                    )
+                    policy_dec = self._config_manager.evaluate_policy(eval_req)
+                    if policy_dec.decision == PolicyEvaluationDecisionType.DENY:
+                        logger.warning(
+                            "Step %s denied by policy evaluation: %s",
+                            planned_step.tool,
+                            policy_dec.reason,
+                        )
+                        obs = StepObservation(
+                            step_number=planned_step.step_number,
+                            tool_name=planned_step.tool,
+                            status=ObservationStatus.DENIED,
+                            exit_code=1,
+                            output_summary=f"PolicyDenied: {policy_dec.reason}"[:200],
+                            raw_output=f"PolicyDenied: {policy_dec.reason}",
+                            duration_ms=0.0,
+                            metadata={"policy_decision": policy_dec.decision.value, "rule_references": policy_dec.rule_references},
+                        )
+                        all_observations.append(obs)
+                        self._store.transition_step_state(
+                            step_record.step_id,
+                            StepState.FAILED,
+                            result_summary=f"PolicyDenied: {policy_dec.reason}",
+                        )
+                        break
+
+                # Invoke through ToolBroker (Trust Core validates capability & policies inside)
                 tool_result = self._tools.invoke(
                     tool_name=planned_step.tool,
                     args=dict(planned_step.arguments),
@@ -809,6 +1443,20 @@ class Supervisor:
                 )
                 all_observations.append(obs)
 
+                # Post-execution durable checkpoint
+                existing_cps = self._store.list_checkpoints(task.task_id)
+                self._store.create_checkpoint(
+                    task_id=task.task_id,
+                    step_id=step_record.step_id,
+                    checkpoint_seq=len(existing_cps) + 1,
+                    snapshot={
+                        "event": "POST_EXECUTION",
+                        "step_index": step_record.step_index,
+                        "status": obs.status.value,
+                        "exit_code": obs.exit_code,
+                    },
+                )
+
                 # 5. VERIFICATION
                 ver = self._verifier.verify(planned_step, obs)
                 all_verifications.append(ver)
@@ -819,7 +1467,14 @@ class Supervisor:
                         StepState.COMPLETED,
                         result_summary=obs.output_summary,
                     )
-                    break  # Advance to next step
+                    completed_steps.append({
+                        "tool": planned_step.tool,
+                        "description": planned_step.description,
+                        "arguments": dict(planned_step.arguments),
+                        "result_summary": obs.output_summary,
+                        "step_id": step_record.step_id,
+                    })
+                    break  # Step succeeded; advance in execution_queue
 
                 # Retry only idempotent steps, bounded
                 if (
@@ -836,7 +1491,19 @@ class Supervisor:
                     )
                     continue
 
-                # Non-retryable or max retries exceeded
+                # Record uncertain operations for non-idempotent actions
+                if not planned_step.is_idempotent and (
+                    obs.status == ObservationStatus.TIMEOUT
+                    or ver.outcome == VerificationOutcome.UNKNOWN
+                ):
+                    uncertain_operations.append({
+                        "tool": planned_step.tool,
+                        "arguments": dict(planned_step.arguments),
+                        "description": planned_step.description,
+                        "rationale": ver.rationale,
+                    })
+
+                # Human approval pathway
                 if ver.requires_approval:
                     self._store.transition_step_state(
                         step_record.step_id,
@@ -858,7 +1525,199 @@ class Supervisor:
                         observations=all_observations,
                     )
 
-                # Fail closed
+                # Observation-driven replanning branch
+                if ver.requires_replan:
+                    if replan_count >= max_replan:
+                        logger.warning(
+                            "Replan limit reached (%d/%d) for task %s",
+                            replan_count,
+                            max_replan,
+                            task.task_id,
+                        )
+                        self._store.transition_step_state(
+                            step_record.step_id,
+                            StepState.FAILED,
+                            result_summary=f"Replan limit reached: {ver.rationale}",
+                        )
+                        final_task = self._store.transition_task_state(
+                            task.task_id,
+                            TaskState.FAILED,
+                            error_summary=f"Replan limit reached ({max_replan} attempts): {ver.rationale}",
+                        )
+                        synthesis = (
+                            f"Execution halted: Replan limit reached ({max_replan} attempts). "
+                            f"Last error: {ver.rationale}"
+                        )
+                        return GoalExecutionResult(
+                            goal_text=goal_text,
+                            success=False,
+                            synthesis=synthesis,
+                            task_record=final_task,
+                            observations=all_observations,
+                        )
+
+                    replan_count += 1
+                    logger.info(
+                        "Triggering observation-driven replanning (attempt %d/%d) after step failure: %s",
+                        replan_count,
+                        max_replan,
+                        ver.rationale,
+                    )
+                    self._store.transition_step_state(
+                        step_record.step_id,
+                        StepState.FAILED,
+                        result_summary=f"Failed (observation: {obs.output_summary}). Replanning triggered.",
+                    )
+
+                    # Mark remaining unexecuted steps in current queue as SKIPPED
+                    for rem_rec, _ in execution_queue:
+                        if rem_rec.state == StepState.PENDING:
+                            self._store.transition_step_state(
+                                rem_rec.step_id,
+                                StepState.SKIPPED,
+                                result_summary="Superseded by replanning.",
+                            )
+                    execution_queue.clear()
+
+                    # Assemble updated ContextIR containing observation history
+                    from src.manager.context import truncate_tool_output
+
+                    new_obs_history = list(context_ir.observation_history)
+                    sanitized_obs = truncate_tool_output(obs.output_summary, max_chars=400)
+                    new_obs_history.append(
+                        f"Step '{planned_step.description}' [{planned_step.tool}] failed: {sanitized_obs}"
+                    )
+                    new_recent_events = list(context_ir.recent_events)
+                    new_recent_events.append(
+                        f"Replan #{replan_count}: completed {len(completed_steps)} steps; step '{planned_step.description}' failed."
+                    )
+                    uncompacted_replan = ContextIR(
+                        active_goal=context_ir.active_goal,
+                        project_id=context_ir.project_id,
+                        task_id=task.task_id,
+                        relevant_preferences=context_ir.relevant_preferences,
+                        relevant_facts=context_ir.relevant_facts,
+                        relevant_lessons=context_ir.relevant_lessons,
+                        recent_events=new_recent_events,
+                        constraints=context_ir.constraints,
+                        observation_history=new_obs_history,
+                        available_token_budget=context_ir.available_token_budget,
+                    )
+                    replan_context = self._context_assembler.compact_context(uncompacted_replan)
+                    context_ir = replan_context
+
+                    # Checkpoint replan event
+                    existing_cps = self._store.list_checkpoints(task.task_id)
+                    self._store.create_checkpoint(
+                        task_id=task.task_id,
+                        step_id=step_record.step_id,
+                        checkpoint_seq=len(existing_cps) + 1,
+                        snapshot={
+                            "event": "REPLAN_TRIGGERED",
+                            "replan_count": replan_count,
+                            "failed_step": planned_step.description,
+                            "observation": obs.output_summary,
+                            "completed_steps": len(completed_steps),
+                        },
+                    )
+
+                    # Request revised fast decision if decision engine is configured
+                    if self._decision is not None:
+                        try:
+                            replan_prompt = (
+                                f"{goal_text} | Failed step: {planned_step.description} | "
+                                f"Observed error: {obs.output_summary}"
+                            )
+                            replan_eval = self._decision.evaluate(
+                                FastDecisionRequest(
+                                    user_input=replan_prompt,
+                                    context=RequestContext(project_scope=project_id),
+                                )
+                            )
+                            replan_routing, replan_provider, _ = self._router.route(
+                                goal_text=replan_prompt,
+                                decision=replan_eval,
+                                default_provider=active_provider,
+                            )
+                            if replan_provider is not None:
+                                if planner is None or planner.provider != replan_provider:
+                                    planner = StructuredPlanner(replan_provider)
+                                active_provider = replan_provider
+                            routing_decision = replan_routing
+                        except Exception as exc:
+                            logger.warning("Replan decision evaluation failed: %s", exc)
+
+                    # Invoke planner for revised plan based on observation
+                    try:
+                        new_plan = planner.generate_replan(
+                            context_ir=replan_context,
+                            broker=self._tools,
+                            failed_step_description=planned_step.description,
+                            observation_summary=obs.output_summary,
+                            completed_step_summaries=completed_steps,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Replanning failed closed for task %s: %s", task.task_id, exc
+                        )
+                        final_task = self._store.transition_task_state(
+                            task.task_id,
+                            TaskState.FAILED,
+                            error_summary=f"Replanning failed: {exc}",
+                        )
+                        synthesis = f"Replanning failed: {exc}"
+                        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+                        self._record_goal_experience(
+                            task=final_task,
+                            goal_text=goal_text,
+                            success=False,
+                            completed_steps=completed_steps,
+                            error_summary=synthesis,
+                            project_id=project_id,
+                            latency_ms=elapsed_ms,
+                        )
+                        return GoalExecutionResult(
+                            goal_text=goal_text,
+                            success=False,
+                            synthesis=synthesis,
+                            task_record=final_task,
+                            observations=all_observations,
+                            routing_decision=routing_decision,
+                        )
+
+                    # Persist newly planned steps in StateStore
+                    all_task_steps = self._store.list_task_steps(task.task_id)
+                    max_idx = max((s.step_index for s in all_task_steps), default=-1)
+                    new_queue: list[tuple[StepRecord, Any]] = []
+                    for offset, n_step in enumerate(new_plan.steps, start=1):
+                        n_rec = self._store.create_step(
+                            task_id=task.task_id,
+                            step_index=max_idx + offset,
+                            action_name=n_step.tool,
+                            tool_name=n_step.tool,
+                            is_idempotent=n_step.is_idempotent,
+                            arguments=dict(n_step.arguments),
+                        )
+                        new_queue.append((n_rec, n_step))
+
+                    # Checkpoint committed replan
+                    existing_cps = self._store.list_checkpoints(task.task_id)
+                    self._store.create_checkpoint(
+                        task_id=task.task_id,
+                        checkpoint_seq=len(existing_cps) + 1,
+                        snapshot={
+                            "event": "REPLAN_COMMITTED",
+                            "replan_count": replan_count,
+                            "new_steps": [s.model_dump() for s in new_plan.steps],
+                        },
+                    )
+
+                    # Enqueue new steps and continue execution
+                    execution_queue.extend(new_queue)
+                    plan = new_plan
+                    break  # Break retry loop to resume execution_queue
+
+                # Fail closed for any unhandled failure outcome
                 self._store.transition_step_state(
                     step_record.step_id,
                     StepState.FAILED,
@@ -870,34 +1729,148 @@ class Supervisor:
                     error_summary=ver.rationale,
                 )
                 synthesis = f"Execution halted: {ver.rationale}"
+                elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+                self._record_goal_experience(
+                    task=final_task,
+                    goal_text=goal_text,
+                    success=False,
+                    completed_steps=completed_steps,
+                    error_summary=synthesis,
+                    project_id=project_id,
+                    latency_ms=elapsed_ms,
+                )
                 return GoalExecutionResult(
                     goal_text=goal_text,
                     success=False,
                     synthesis=synthesis,
                     task_record=final_task,
                     observations=all_observations,
+                    routing_decision=routing_decision,
                 )
 
-        # 6. SYNTHESIS
-        completed_task = self._store.transition_task_state(task.task_id, TaskState.COMPLETED)
-        if self._synthesizer is not None:
-            synthesis_text = self._synthesizer.synthesize(
-                goal=goal_text,
-                plan=plan,
-                observations=all_observations,
-                verifications=all_verifications,
+        # 6. COMPLETION VERIFICATION & SYNTHESIS
+        current_task_rec = self._store.get_task(task.task_id)
+        if current_task_rec and current_task_rec.state != TaskState.EXECUTING:
+            elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+            self._record_goal_experience(
+                task=current_task_rec,
+                goal_text=goal_text,
+                success=False,
+                completed_steps=completed_steps,
+                error_summary=f"Task ended in non-executing state: {current_task_rec.state.value}",
+                project_id=project_id,
+                latency_ms=elapsed_ms,
             )
+            return GoalExecutionResult(
+                goal_text=goal_text,
+                success=False,
+                synthesis=f"Task ended in non-executing state: {current_task_rec.state.value}",
+                task_record=current_task_rec,
+                observations=all_observations,
+                routing_decision=routing_decision,
+            )
+
+        if not completed_steps:
+            final_task = self._store.transition_task_state(
+                task.task_id,
+                TaskState.FAILED,
+                error_summary="Execution finished without any completed steps.",
+            )
+            elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+            self._record_goal_experience(
+                task=final_task,
+                goal_text=goal_text,
+                success=False,
+                completed_steps=[],
+                error_summary="Execution finished without any completed steps.",
+                project_id=project_id,
+                latency_ms=elapsed_ms,
+            )
+            return GoalExecutionResult(
+                goal_text=goal_text,
+                success=False,
+                synthesis="Execution halted: No steps completed successfully.",
+                task_record=final_task,
+                observations=all_observations,
+                routing_decision=routing_decision,
+            )
+
+        completed_task = self._store.transition_task_state(
+            task.task_id, TaskState.COMPLETED
+        )
+        elapsed_ms = (time.perf_counter() - t_start) * 1000.0
+
+        synthesis_res: Optional[SynthesisResult] = None
+        synthesis_text: str
+        synthesis_failed_under_strict = False
+        synthesis_error_msg: Optional[str] = None
+
+        if self._synthesizer is not None:
+            try:
+                synthesis_res = self._synthesizer.synthesize(
+                    goal=goal_text,
+                    plan=plan,
+                    observations=all_observations,
+                    verifications=all_verifications,
+                )
+                synthesis_text = synthesis_res.text
+            except SynthesisError as exc:
+                logger.error("Synthesis failed under STRICT policy: %s", exc)
+                synthesis_failed_under_strict = True
+                synthesis_error_msg = str(exc)
+                synthesis_text = f"Execution halted: Synthesis failed under STRICT policy: {exc}"
+                synthesis_res = SynthesisResult(
+                    text=synthesis_text,
+                    is_degraded=True,
+                    fallback_used=False,
+                    provider_error=getattr(exc, "diagnostics", None),
+                    policy=SynthesisDegradationPolicy.STRICT,
+                )
+                if getattr(self, "_strict_synthesis", False):
+                    self._record_goal_experience(
+                        task=completed_task,
+                        goal_text=goal_text,
+                        success=False,
+                        completed_steps=completed_steps,
+                        project_id=project_id,
+                        latency_ms=elapsed_ms,
+                        error_summary=f"Strict synthesis failure: {exc}",
+                        synthesis_degraded=True,
+                        synthesis_error=str(exc),
+                    )
+                    raise
         else:
             synthesis_text = (
                 f"Goal '{goal_text}' completed successfully across {len(all_observations)} step(s)."
             )
 
+        is_degraded = bool(synthesis_res and synthesis_res.is_degraded)
+        final_success = not synthesis_failed_under_strict
+
+        self._record_goal_experience(
+            task=completed_task,
+            goal_text=goal_text,
+            success=final_success,
+            completed_steps=completed_steps,
+            project_id=project_id,
+            latency_ms=elapsed_ms,
+            error_summary=synthesis_error_msg if synthesis_failed_under_strict else None,
+            synthesis_degraded=is_degraded,
+            synthesis_error=(
+                synthesis_res.provider_error.error_message
+                if (synthesis_res and synthesis_res.provider_error)
+                else synthesis_error_msg
+            ),
+        )
+
         return GoalExecutionResult(
             goal_text=goal_text,
-            success=True,
+            success=final_success,
             synthesis=synthesis_text,
             task_record=completed_task,
             observations=all_observations,
+            routing_decision=routing_decision,
+            synthesis_result=synthesis_res,
         )
 
     # ==========================================================================
@@ -929,6 +1902,10 @@ class Supervisor:
         invocation: Any,
         actor: str = "supervisor",
         project_id: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+        root_task_id: Optional[str] = None,
+        execution_id: Optional[str] = None,
+        parent_execution_id: Optional[str] = None,
     ) -> Any:
         """Execute a skill following the Supervisor -> Skill Protocol.
 
@@ -994,6 +1971,11 @@ class Supervisor:
                     verification_status=VerificationStatus.FAILED,
                 )
 
+        target_task_id = getattr(invocation, "task_id", None) or parent_task_id
+        eff_parent_id = parent_task_id or getattr(invocation, "parent_task_id", None)
+        eff_root_id = root_task_id or getattr(invocation, "root_task_id", None)
+        exec_id = execution_id or getattr(invocation, "invocation_id", None) or str(uuid4())
+
         try:
             self._skill_registry.transition_lifecycle(
                 manifest.skill_id, SkillLifecycleState.ADMITTED
@@ -1001,6 +1983,26 @@ class Supervisor:
             self._skill_registry.transition_lifecycle(
                 manifest.skill_id, SkillLifecycleState.EXECUTING
             )
+
+            # Record durable pre-execution checkpoint for skill
+            if self._store is not None and target_task_id:
+                try:
+                    existing_cps = self._store.list_checkpoints(target_task_id)
+                    self._store.create_checkpoint(
+                        task_id=target_task_id,
+                        checkpoint_seq=len(existing_cps) + 1,
+                        snapshot={
+                            "event": "SKILL_PRE_EXECUTION",
+                            "skill_id": manifest.skill_id,
+                            "invocation_id": exec_id,
+                        },
+                        parent_task_id=eff_parent_id,
+                        root_task_id=eff_root_id,
+                        execution_id=exec_id,
+                        parent_execution_id=parent_execution_id,
+                    )
+                except Exception as cp_err:
+                    logger.warning("Failed to record skill pre-execution checkpoint: %s", cp_err)
 
             executor = self._skill_registry.get_executor(manifest.skill_id)
             if executor is None:
@@ -1035,6 +2037,28 @@ class Supervisor:
                 )
                 outcome = ExperienceOutcomeType.EXECUTION_FAILURE
 
+            # Record durable post-execution checkpoint for skill
+            if self._store is not None and target_task_id:
+                try:
+                    existing_cps = self._store.list_checkpoints(target_task_id)
+                    self._store.create_checkpoint(
+                        task_id=target_task_id,
+                        checkpoint_seq=len(existing_cps) + 1,
+                        snapshot={
+                            "event": "SKILL_POST_EXECUTION",
+                            "skill_id": manifest.skill_id,
+                            "invocation_id": exec_id,
+                            "status": result.status.value,
+                            "verification_status": result.verification_status.value,
+                        },
+                        parent_task_id=eff_parent_id,
+                        root_task_id=eff_root_id,
+                        execution_id=exec_id,
+                        parent_execution_id=parent_execution_id,
+                    )
+                except Exception as cp_err:
+                    logger.warning("Failed to record skill post-execution checkpoint: %s", cp_err)
+
             if self._experience_service is not None:
                 exp_event = ExperienceEvent(
                     task_id=invocation.task_id or invocation.invocation_id,
@@ -1061,25 +2085,44 @@ class Supervisor:
 class GoalExecutionResult:
     """Result of a complete execute_goal() agent loop."""
 
-    __slots__ = ("goal_text", "success", "synthesis", "task_record", "observations")
+    __slots__ = (
+        "goal_text",
+        "success",
+        "synthesis",
+        "task_record",
+        "observations",
+        "routing_decision",
+        "synthesis_result",
+    )
 
     def __init__(
         self,
         goal_text: str,
         success: bool,
-        synthesis: str,
+        synthesis: Any,
         task_record: Optional[TaskRecord],
         observations: list,
+        routing_decision: Optional[Any] = None,
+        synthesis_result: Optional[Any] = None,
     ) -> None:
         self.goal_text = goal_text
         self.success = success
-        self.synthesis = synthesis
+        if hasattr(synthesis, "text"):
+            self.synthesis = synthesis.text
+            self.synthesis_result = synthesis if synthesis_result is None else synthesis_result
+        else:
+            self.synthesis = str(synthesis)
+            self.synthesis_result = synthesis_result
         self.task_record = task_record
         self.observations = observations
+        self.routing_decision = routing_decision
 
     def __repr__(self) -> str:
         return (
             f"GoalExecutionResult(success={self.success!r}, "
             f"synthesis={self.synthesis!r}, "
-            f"steps={len(self.observations)})"
+            f"steps={len(self.observations)}, "
+            f"strategy={getattr(self.routing_decision, 'strategy', None)!r}, "
+            f"degraded={getattr(self.synthesis_result, 'is_degraded', False)!r})"
         )
+

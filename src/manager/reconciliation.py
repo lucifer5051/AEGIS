@@ -57,6 +57,24 @@ class ReconciliationEngine:
             Structured ReconciliationReport summarizing recovery actions.
         """
         in_flight_tasks = self._store.get_in_flight_tasks()
+
+        # Sort topologically: roots first (depth 0), then direct children (depth 1), etc.
+        def _depth(t: TaskRecord) -> int:
+            d = 0
+            curr = t
+            visited = set()
+            while curr.parent_task_id and curr.parent_task_id != curr.task_id:
+                if curr.parent_task_id in visited:
+                    break
+                visited.add(curr.parent_task_id)
+                d += 1
+                curr_parent = self._store.get_task(curr.parent_task_id)
+                if not curr_parent:
+                    break
+                curr = curr_parent
+            return d
+
+        in_flight_tasks = sorted(in_flight_tasks, key=_depth)
         reconciled_results: List[ReconciledTaskResult] = []
 
         resumed_count = 0
@@ -99,6 +117,36 @@ class ReconciliationEngine:
     def _reconcile_single_task(self, task: TaskRecord) -> ReconciledTaskResult:
         """Reconcile an individual in-flight task."""
         try:
+            # Check parent task state if this is a subtask
+            if task.parent_task_id:
+                parent = self._store.get_task(task.parent_task_id)
+                if parent is not None and parent.state in (TaskState.FAILED, TaskState.CANCELLED):
+                    new_state = (
+                        TaskState.CANCELLED
+                        if parent.state == TaskState.CANCELLED
+                        else TaskState.FAILED
+                    )
+                    try:
+                        updated = self._store.transition_task_state(
+                            task.task_id,
+                            new_state,
+                            error_summary=f"Parent task '{parent.task_id}' was {parent.state.value}.",
+                        )
+                    except Exception:
+                        updated = task
+                    return ReconciledTaskResult(
+                        task_id=task.task_id,
+                        disposition=RecoveryDisposition.FAIL_TERMINAL,
+                        previous_state=task.state,
+                        new_state=updated.state,
+                        action_summary=f"Parent task '{parent.task_id}' is {parent.state.value}; child safely terminated.",
+                        parent_task_id=task.parent_task_id,
+                        root_task_id=task.root_task_id,
+                    )
+
+            children = self._store.get_child_tasks(task.task_id)
+            child_ids = [c.task_id for c in children]
+
             if task.state == TaskState.SUBMITTED:
                 return ReconciledTaskResult(
                     task_id=task.task_id,
@@ -106,6 +154,9 @@ class ReconciliationEngine:
                     previous_state=task.state,
                     new_state=task.state,
                     action_summary="Task is submitted and ready for planning.",
+                    parent_task_id=task.parent_task_id,
+                    root_task_id=task.root_task_id,
+                    child_task_ids=child_ids,
                 )
 
             if task.state == TaskState.AWAITING_APPROVAL:
@@ -115,6 +166,9 @@ class ReconciliationEngine:
                     previous_state=task.state,
                     new_state=task.state,
                     action_summary="Task continues awaiting user approval.",
+                    parent_task_id=task.parent_task_id,
+                    root_task_id=task.root_task_id,
+                    child_task_ids=child_ids,
                 )
 
             if task.state == TaskState.PLANNING:
@@ -126,6 +180,9 @@ class ReconciliationEngine:
                         previous_state=task.state,
                         new_state=task.state,
                         action_summary="Planning incomplete; ready to resume plan formation.",
+                        parent_task_id=task.parent_task_id,
+                        root_task_id=task.root_task_id,
+                        child_task_ids=child_ids,
                     )
                 # If all steps exist and are PENDING, advance to EXECUTING
                 all_pending = all(s.state == StepState.PENDING for s in steps)
@@ -137,6 +194,9 @@ class ReconciliationEngine:
                         previous_state=task.state,
                         new_state=updated.state,
                         action_summary="Plan steps verified; advanced to EXECUTING.",
+                        parent_task_id=task.parent_task_id,
+                        root_task_id=task.root_task_id,
+                        child_task_ids=child_ids,
                     )
                 return ReconciledTaskResult(
                     task_id=task.task_id,
@@ -144,6 +204,9 @@ class ReconciliationEngine:
                     previous_state=task.state,
                     new_state=task.state,
                     action_summary="Planning task in progress; ready to resume.",
+                    parent_task_id=task.parent_task_id,
+                    root_task_id=task.root_task_id,
+                    child_task_ids=child_ids,
                 )
 
             if task.state == TaskState.EXECUTING:
@@ -156,6 +219,9 @@ class ReconciliationEngine:
                 previous_state=task.state,
                 new_state=task.state,
                 action_summary=f"Task preserved in state '{task.state.value}'.",
+                parent_task_id=task.parent_task_id,
+                root_task_id=task.root_task_id,
+                child_task_ids=child_ids,
             )
 
         except Exception as exc:
@@ -174,15 +240,63 @@ class ReconciliationEngine:
                 previous_state=task.state,
                 new_state=TaskState.FAILED,
                 action_summary=f"Reconciliation failed with error: {exc}",
+                parent_task_id=task.parent_task_id,
+                root_task_id=task.root_task_id,
             )
 
     def _reconcile_executing_task(self, task: TaskRecord) -> ReconciledTaskResult:
         """Reconcile a task that was actively EXECUTING when the crash occurred."""
         steps = self._store.list_task_steps(task.task_id)
         checkpoints = self._store.list_checkpoints(task.task_id)
+        children = self._store.get_child_tasks(task.task_id)
+        child_ids = [c.task_id for c in children]
 
         if not steps:
-            # No steps registered; fail closed
+            if children:
+                # Orchestrating parent task with subtasks
+                any_child_failed = any(c.state == TaskState.FAILED for c in children)
+                all_child_completed = all(c.state == TaskState.COMPLETED for c in children)
+                if any_child_failed:
+                    updated = self._store.transition_task_state(
+                        task.task_id,
+                        TaskState.FAILED,
+                        error_summary="One or more child subtasks failed.",
+                    )
+                    return ReconciledTaskResult(
+                        task_id=task.task_id,
+                        disposition=RecoveryDisposition.FAIL_TERMINAL,
+                        previous_state=task.state,
+                        new_state=updated.state,
+                        action_summary="Failed closed: subtask execution failed.",
+                        parent_task_id=task.parent_task_id,
+                        root_task_id=task.root_task_id,
+                        child_task_ids=child_ids,
+                    )
+                elif all_child_completed:
+                    updated = self._store.transition_task_state(task.task_id, TaskState.COMPLETED)
+                    return ReconciledTaskResult(
+                        task_id=task.task_id,
+                        disposition=RecoveryDisposition.RESUME,
+                        previous_state=task.state,
+                        new_state=updated.state,
+                        action_summary="All subtasks completed; parent task marked COMPLETED.",
+                        parent_task_id=task.parent_task_id,
+                        root_task_id=task.root_task_id,
+                        child_task_ids=child_ids,
+                    )
+                else:
+                    return ReconciledTaskResult(
+                        task_id=task.task_id,
+                        disposition=RecoveryDisposition.RESUME,
+                        previous_state=task.state,
+                        new_state=task.state,
+                        action_summary="Parent task with in-flight subtasks ready to resume.",
+                        parent_task_id=task.parent_task_id,
+                        root_task_id=task.root_task_id,
+                        child_task_ids=child_ids,
+                    )
+
+            # No steps registered and no subtasks; fail closed
             updated = self._store.transition_task_state(
                 task.task_id,
                 TaskState.FAILED,
@@ -194,6 +308,8 @@ class ReconciliationEngine:
                 previous_state=task.state,
                 new_state=updated.state,
                 action_summary="Failed closed: executing task had no steps.",
+                parent_task_id=task.parent_task_id,
+                root_task_id=task.root_task_id,
             )
 
         running_steps = [s for s in steps if s.state == StepState.RUNNING]
@@ -209,6 +325,9 @@ class ReconciliationEngine:
                     previous_state=task.state,
                     new_state=updated.state,
                     action_summary="All steps were completed; task marked COMPLETED.",
+                    parent_task_id=task.parent_task_id,
+                    root_task_id=task.root_task_id,
+                    child_task_ids=child_ids,
                 )
 
             # Check if any step is awaiting approval
@@ -224,6 +343,9 @@ class ReconciliationEngine:
                     action_summary=(
                         "Step awaiting approval; task transitioned to AWAITING_APPROVAL."
                     ),
+                    parent_task_id=task.parent_task_id,
+                    root_task_id=task.root_task_id,
+                    child_task_ids=child_ids,
                 )
 
             # Remaining steps are PENDING; safely resume
@@ -238,6 +360,9 @@ class ReconciliationEngine:
                     f"Clean checkpoint found; ready to resume from step index {step_idx}."
                 ),
                 step_id=first_pending.step_id if first_pending else None,
+                parent_task_id=task.parent_task_id,
+                root_task_id=task.root_task_id,
+                child_task_ids=child_ids,
             )
 
         # There is an in-flight step
@@ -266,6 +391,9 @@ class ReconciliationEngine:
                     new_state=updated.state,
                     action_summary="In-flight step had completion checkpoint; all steps complete.",
                     step_id=in_flight_step.step_id,
+                    parent_task_id=task.parent_task_id,
+                    root_task_id=task.root_task_id,
+                    child_task_ids=child_ids,
                 )
 
             return ReconciledTaskResult(
@@ -275,6 +403,9 @@ class ReconciliationEngine:
                 new_state=task.state,
                 action_summary="In-flight step had completion checkpoint; advanced to COMPLETED.",
                 step_id=in_flight_step.step_id,
+                parent_task_id=task.parent_task_id,
+                root_task_id=task.root_task_id,
+                child_task_ids=child_ids,
             )
 
         # No completion checkpoint.
@@ -295,6 +426,9 @@ class ReconciliationEngine:
                     f"({in_flight_step.action_name}) reset to PENDING for safe retry."
                 ),
                 step_id=in_flight_step.step_id,
+                parent_task_id=task.parent_task_id,
+                root_task_id=task.root_task_id,
+                child_task_ids=child_ids,
             )
 
         # Ambiguous in-flight side effect! Non-idempotent action must NEVER be blindly replayed.
@@ -323,6 +457,9 @@ class ReconciliationEngine:
                 "interrupted mid-execution; escalated to AWAITING_APPROVAL."
             ),
             step_id=in_flight_step.step_id,
+            parent_task_id=task.parent_task_id,
+            root_task_id=task.root_task_id,
+            child_task_ids=child_ids,
         )
 
     def _find_completion_checkpoint(

@@ -20,6 +20,10 @@ class TaskStateError(ManagerError):
     """
 
 
+class TaskHierarchyError(ManagerError):
+    """Raised when a task hierarchy constraint is violated (cycles, missing parent, max depth)."""
+
+
 class TaskNotFoundError(ManagerError):
     """Raised when a referenced task does not exist in the state store."""
 

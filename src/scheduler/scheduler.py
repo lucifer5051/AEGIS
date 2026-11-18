@@ -26,6 +26,12 @@ from src.scheduler.errors import (
     ScheduleNotFoundError,
     ScheduleValidationError,
 )
+from src.scheduler.job_models import (
+    BackgroundJob,
+    JobExecutionResult,
+    JobStatus,
+    WorkerRegistration,
+)
 from src.scheduler.models import (
     MissedRunPolicy,
     ScheduleDefinition,
@@ -37,6 +43,10 @@ from src.scheduler.models import (
 from src.scheduler.store import SchedulerStore
 from src.trust.audit import _check_no_secrets
 from src.workflow.engine import WorkflowEngine
+
+if False:
+    from src.scheduler.job_queue import JobQueue
+    from src.scheduler.worker_manager import WorkerManager
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +73,9 @@ class WorkflowScheduler:
     def __init__(
         self,
         scheduler_store: SchedulerStore,
-        workflow_engine: WorkflowEngine,
+        workflow_engine: Optional[WorkflowEngine] = None,
+        job_queue: Optional[Any] = None,
+        worker_manager: Optional[Any] = None,
         admission_controller: Optional[Any] = None,
         missed_run_threshold_seconds: float = DEFAULT_MISSED_RUN_THRESHOLD_SECONDS,
         max_concurrent_runs: int = 5,
@@ -71,6 +83,8 @@ class WorkflowScheduler:
         """Initialize scheduler with required persistence and execution engine."""
         self._store = scheduler_store
         self._engine = workflow_engine
+        self._job_queue = job_queue
+        self._worker_manager = worker_manager
         self._admission = admission_controller
         self._missed_threshold = missed_run_threshold_seconds
         self._max_concurrency = max_concurrent_runs
@@ -335,7 +349,23 @@ class WorkflowScheduler:
             result_summary = None
 
             try:
-                if schedule.workflow_id:
+                if self._job_queue is not None:
+                    goal = schedule.parameters.get("goal_text") or schedule.target_action
+                    bg_job = BackgroundJob(
+                        schedule_id=schedule.schedule_id,
+                        goal_text=goal,
+                        action_type="workflow" if schedule.workflow_id else "goal_execution",
+                        status=JobStatus.QUEUED,
+                        priority=schedule.parameters.get("priority", 10),
+                        scheduled_at=scheduled_slot,
+                        configuration_reference=schedule.parameters.get("configuration_ref", {}),
+                        metadata=dict(schedule.parameters),
+                    )
+                    self._job_queue.enqueue_job(bg_job)
+                    run_id = None
+                    run_success = True
+                    result_summary = f"Job '{bg_job.job_id}' queued for background execution."
+                elif schedule.workflow_id and self._engine is not None:
                     wf_run = self._engine.start_workflow(
                         workflow_id=schedule.workflow_id,
                         inputs=schedule.parameters,
@@ -502,3 +532,259 @@ class WorkflowScheduler:
                 return after_time + timedelta(seconds=schedule.interval_seconds)
 
         return None
+
+    # ==========================================================================
+    # BACKGROUND JOB & CONVENIENCE SCHEDULING
+    # ==========================================================================
+
+    def schedule_immediate(
+        self,
+        target_action: str,
+        goal_text: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
+        project_id: Optional[str] = None,
+        configuration_ref: Optional[Dict[str, Any]] = None,
+        priority: int = 10,
+    ) -> BackgroundJob:
+        """Schedule a job for immediate background execution."""
+        if self._job_queue is None:
+            raise RuntimeError("JobQueue must be configured to use schedule_immediate().")
+        now_str = _now_utc()
+        params = dict(parameters or {})
+        _check_no_secrets(str(params))
+        config_ref = dict(configuration_ref or {})
+        if project_id:
+            config_ref["project_id"] = project_id
+        _check_no_secrets(str(config_ref))
+        goal = goal_text or target_action
+
+        job = BackgroundJob(
+            goal_text=goal,
+            action_type="goal_execution",
+            status=JobStatus.QUEUED,
+            priority=priority,
+            created_at=now_str,
+            scheduled_at=now_str,
+            configuration_reference=config_ref,
+            metadata=params,
+        )
+        return self._job_queue.enqueue_job(job)
+
+    def schedule_delayed(
+        self,
+        delay_seconds: float,
+        target_action: str,
+        goal_text: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
+        project_id: Optional[str] = None,
+        configuration_ref: Optional[Dict[str, Any]] = None,
+        priority: int = 10,
+    ) -> BackgroundJob:
+        """Schedule a job for execution after a specified delay."""
+        if self._job_queue is None:
+            raise RuntimeError("JobQueue must be configured to use schedule_delayed().")
+        now_dt = datetime.now(timezone.utc)
+        sched_dt = now_dt + timedelta(seconds=delay_seconds)
+        now_str = now_dt.isoformat()
+        sched_str = sched_dt.isoformat()
+
+        params = dict(parameters or {})
+        _check_no_secrets(str(params))
+        config_ref = dict(configuration_ref or {})
+        if project_id:
+            config_ref["project_id"] = project_id
+        _check_no_secrets(str(config_ref))
+        goal = goal_text or target_action
+
+        job = BackgroundJob(
+            goal_text=goal,
+            action_type="goal_execution",
+            status=JobStatus.PENDING,
+            priority=priority,
+            created_at=now_str,
+            scheduled_at=sched_str,
+            configuration_reference=config_ref,
+            metadata=params,
+        )
+        return self._job_queue.enqueue_job(job)
+
+    def schedule_at(
+        self,
+        run_at: datetime,
+        target_action: str,
+        goal_text: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
+        project_id: Optional[str] = None,
+        configuration_ref: Optional[Dict[str, Any]] = None,
+        priority: int = 10,
+    ) -> BackgroundJob:
+        """Schedule a job for execution at a specific future datetime."""
+        if self._job_queue is None:
+            raise RuntimeError("JobQueue must be configured to use schedule_at().")
+        if run_at.tzinfo is None:
+            run_at_utc = run_at.replace(tzinfo=timezone.utc)
+        else:
+            run_at_utc = run_at.astimezone(timezone.utc)
+
+        now_str = _now_utc()
+        sched_str = run_at_utc.isoformat()
+
+        params = dict(parameters or {})
+        _check_no_secrets(str(params))
+        config_ref = dict(configuration_ref or {})
+        if project_id:
+            config_ref["project_id"] = project_id
+        _check_no_secrets(str(config_ref))
+        goal = goal_text or target_action
+
+        job = BackgroundJob(
+            goal_text=goal,
+            action_type="goal_execution",
+            status=JobStatus.PENDING,
+            priority=priority,
+            created_at=now_str,
+            scheduled_at=sched_str,
+            configuration_reference=config_ref,
+            metadata=params,
+        )
+        return self._job_queue.enqueue_job(job)
+
+    def create_recurring_schedule(
+        self,
+        recurrence: str,
+        target_action: str,
+        project_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
+        missed_run_policy: MissedRunPolicy = MissedRunPolicy.RUN_ONCE,
+        timezone_offset_minutes: Optional[int] = None,
+    ) -> ScheduleDefinition:
+        """Create a recurring schedule with friendly recurrence expressions and timezone support."""
+        now_dt = datetime.now(timezone.utc)
+        cron_expr: Optional[str] = None
+        interval_secs: Optional[int] = None
+
+        rec_lower = recurrence.strip().lower()
+        if rec_lower == "hourly":
+            cron_expr = "0 * * * *"
+        elif rec_lower == "daily":
+            cron_expr = "0 0 * * *"
+        elif rec_lower == "weekly":
+            cron_expr = "0 0 * * 0"
+        elif rec_lower == "monthly":
+            cron_expr = "0 0 1 * *"
+        elif rec_lower.isdigit():
+            interval_secs = int(rec_lower)
+        else:
+            # Assume standard cron expression
+            cron_expr = recurrence.strip()
+
+        # Handle timezone offset if specified
+        if cron_expr and timezone_offset_minutes is not None:
+            tz = timezone(timedelta(minutes=timezone_offset_minutes))
+            local_now = now_dt.astimezone(tz)
+            next_local = compute_next_cron_run(cron_expr, local_now)
+            next_utc = next_local.astimezone(timezone.utc)
+            next_run_str = next_utc.isoformat()
+        else:
+            next_run_str = None
+
+        return self.create_schedule(
+            target_action=target_action,
+            schedule_type=ScheduleType.CRON_RECURRING,
+            workflow_id=workflow_id,
+            project_id=project_id,
+            cron_expression=cron_expr,
+            interval_seconds=interval_secs,
+            parameters=parameters,
+            missed_run_policy=missed_run_policy,
+            next_run_at=next_run_str,
+        )
+
+    # ==========================================================================
+    # JOB & WORKER DELEGATION APIS
+    # ==========================================================================
+
+    def list_jobs(
+        self,
+        status: Optional[JobStatus] = None,
+        schedule_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[BackgroundJob]:
+        """List background jobs with optional status filter."""
+        if not self._job_queue:
+            return []
+        return self._job_queue.list_jobs(status=status, schedule_id=schedule_id, limit=limit)
+
+    def get_job(self, job_id: str) -> Optional[BackgroundJob]:
+        """Retrieve a background job by ID."""
+        if not self._job_queue:
+            return None
+        return self._job_queue.get_job(job_id)
+
+    def cancel_job(self, job_id: str, reason: str = "Cancelled by user") -> Optional[BackgroundJob]:
+        """Cancel a pending or queued job."""
+        if not self._job_queue:
+            return None
+        return self._job_queue.cancel_job(job_id, reason=reason)
+
+    def retry_job(self, job_id: str) -> Optional[BackgroundJob]:
+        """Reset a failed job to QUEUED for immediate retry."""
+        if not self._job_queue:
+            return None
+        return self._job_queue.retry_job(job_id)
+
+    def approve_job(
+        self,
+        job_id: str,
+        approver: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[BackgroundJob]:
+        """Resume an approval-suspended job."""
+        if not self._job_queue:
+            return None
+        return self._job_queue.resume_approved_job(job_id, approver=approver, approval_metadata=metadata)
+
+    def reject_job(self, job_id: str, reason: str = "Rejected by user") -> Optional[BackgroundJob]:
+        """Reject an approval-suspended job."""
+        if not self._job_queue:
+            return None
+        return self._job_queue.reject_job(job_id, reason=reason)
+
+    def get_worker_status(self, worker_id: str) -> Optional[WorkerRegistration]:
+        """Get status for a specific background worker."""
+        if not self._worker_manager:
+            return None
+        return self._worker_manager.get_worker_status(worker_id)
+
+    def list_workers(self) -> List[WorkerRegistration]:
+        """List all registered background workers."""
+        if not self._worker_manager:
+            return []
+        return self._worker_manager.list_workers()
+
+    def run_worker_tick(
+        self,
+        worker_id: str,
+        current_time: Optional[datetime] = None,
+    ) -> Optional[JobExecutionResult]:
+        """Run a single execution cycle on the configured worker manager."""
+        if not self._worker_manager:
+            return None
+        return self._worker_manager.run_worker_tick(worker_id, current_time=current_time)
+
+    def start_worker(self, worker_id: Optional[str] = None) -> str:
+        """Start a background worker thread."""
+        if not self._worker_manager:
+            raise RuntimeError("WorkerManager must be configured to start background workers.")
+        return self._worker_manager.start_worker(worker_id=worker_id)
+
+    def stop_worker(self, worker_id: str, timeout_seconds: float = 5.0) -> None:
+        """Stop a background worker thread."""
+        if self._worker_manager:
+            self._worker_manager.stop_worker(worker_id, timeout_seconds=timeout_seconds)
+
+    def stop_all_workers(self, timeout_seconds: float = 5.0) -> None:
+        """Stop all background worker threads."""
+        if self._worker_manager:
+            self._worker_manager.stop_all(timeout_seconds=timeout_seconds)

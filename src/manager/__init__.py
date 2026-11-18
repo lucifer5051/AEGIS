@@ -25,6 +25,14 @@ from src.manager.briefing import (
     ExecutionBudget,
     ProvenanceType,
 )
+from src.manager.context import (
+    ContextAssembler,
+    ContextIR,
+    ExecutionLessonContext,
+    HistoryCompactor,
+    estimate_tokens,
+    truncate_tool_output,
+)
 from src.manager.errors import (
     BudgetExhaustedError,
     ConfirmationRequiredError,
@@ -74,6 +82,17 @@ from src.manager.research import (
 )
 from src.manager.state_store import StateStore
 from src.manager.supervisor import GoalExecutionResult, Supervisor
+from src.manager.synthesis import (
+    ProviderErrorDiagnostics,
+    SynthesisContextLengthError,
+    SynthesisDegradationPolicy,
+    SynthesisError,
+    SynthesisFailureType,
+    SynthesisProviderUnavailableError,
+    SynthesisResult,
+    SynthesisTimeoutError,
+    TaskSynthesizer,
+)
 from src.tools.broker import ToolBroker
 from src.trust.authority import TrustAuthority
 
@@ -101,6 +120,13 @@ __all__ = [
     "ContextProvenanceItem",
     "ExecutionBudget",
     "ProvenanceType",
+    # Context & Bounded Compaction
+    "ContextAssembler",
+    "ContextIR",
+    "ExecutionLessonContext",
+    "HistoryCompactor",
+    "estimate_tokens",
+    "truncate_tool_output",
     # Research & Diagnosis
     "CompositeResearchProvider",
     "DiagnosticInvestigator",
@@ -130,6 +156,16 @@ __all__ = [
     "SupervisorExecutionError",
     "TaskNotFoundError",
     "TaskStateError",
+    # Task Synthesis & Degradation
+    "ProviderErrorDiagnostics",
+    "SynthesisContextLengthError",
+    "SynthesisDegradationPolicy",
+    "SynthesisError",
+    "SynthesisFailureType",
+    "SynthesisProviderUnavailableError",
+    "SynthesisResult",
+    "SynthesisTimeoutError",
+    "TaskSynthesizer",
     # Subsystem Components
     "ReconciliationEngine",
     "StateStore",
@@ -151,6 +187,11 @@ def build_supervisor(
     memory_store: Optional[object] = None,
     retriever: Optional[object] = None,
     lesson_manager: Optional[object] = None,
+    reasoning_provider: Optional[Any] = None,
+    reasoning_providers: Optional[Dict[str, Any]] = None,
+    synthesizer: Optional[TaskSynthesizer] = None,
+    strict_synthesis: bool = False,
+    synthesis_policy: Optional[SynthesisDegradationPolicy] = None,
 ) -> Supervisor:
     """Convenience factory to wire up a Supervisor with a fresh StateStore.
 
@@ -163,6 +204,11 @@ def build_supervisor(
         trust_authority=trust_authority,
         tool_broker=tool_broker,
         fast_decision=fast_decision,
+        reasoning_provider=reasoning_provider,
+        reasoning_providers=reasoning_providers,
+        synthesizer=synthesizer,
+        strict_synthesis=strict_synthesis,
+        synthesis_policy=synthesis_policy,
         skill_registry=skill_registry,
         clarification_gate=clarification_gate,
         admission_controller=admission_controller,
@@ -171,3 +217,4 @@ def build_supervisor(
         retriever=retriever,
         lesson_manager=lesson_manager,
     )
+

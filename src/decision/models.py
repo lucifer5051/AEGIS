@@ -120,6 +120,10 @@ class RequestContext(DecisionBaseModel):
         default="en",
         description="Locale code (default 'en').",
     )
+    active_lessons: Optional[List[str]] = Field(
+        default=None,
+        description="Trigger conditions or titles of approved operational lessons.",
+    )
 
 
 class FastDecisionRequest(DecisionBaseModel):

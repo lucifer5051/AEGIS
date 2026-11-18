@@ -37,6 +37,11 @@ from src.decision.providers import (
     FastDecisionProvider,
     VonFastDecisionProvider,
 )
+from src.decision.routing import (
+    ExecutionRouter,
+    ExecutionStrategy,
+    RoutingDecision,
+)
 from src.decision.service import (
     CANONICAL_INTENT_CRITERIA,
     DEFAULT_QUALIFIED_THRESHOLDS,
@@ -59,6 +64,10 @@ __all__ = [
     "FastDecisionService",
     "CANONICAL_INTENT_CRITERIA",
     "DEFAULT_QUALIFIED_THRESHOLDS",
+    # Routing
+    "ExecutionRouter",
+    "ExecutionStrategy",
+    "RoutingDecision",
     # Providers
     "FastDecisionProvider",
     "VonFastDecisionProvider",
@@ -79,3 +88,4 @@ __all__ = [
     "GOLDEN_ROUTING_QUALIFICATION_SET",
     "ADVERSARIAL_EDGE_TEST_SET",
 ]
+

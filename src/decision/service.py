@@ -246,6 +246,30 @@ class FastDecisionService:
                 is_advisory_only=True,
             )
 
+        # Step 4b: Check advisory active lesson triggers
+        if request.context.active_lessons:
+            cautionary_keywords = ("plan", "avoid", "caution", "fallback", "manual", "complex", "fail")
+            for lesson_cue in request.context.active_lessons:
+                cue_lower = lesson_cue.lower()
+                if any(kw in cue_lower for kw in cautionary_keywords):
+                    logger.info(
+                        "Decision %s: active operational lesson advises caution ('%s'); falling back to Manager.",
+                        decision_id,
+                        lesson_cue,
+                    )
+                    return FastDecisionResult(
+                        decision_id=decision_id,
+                        outcome=DecisionOutcome.FALLBACK_TO_MANAGER,
+                        route=route,
+                        confidence=conf,
+                        alternatives=raw_result.alternatives,
+                        provider_id=raw_result.provider_id,
+                        provider_version=raw_result.provider_version,
+                        latency_ms=raw_result.latency_ms,
+                        fallback_reason=FallbackReason.LOW_CONFIDENCE,
+                        is_advisory_only=True,
+                    )
+
         # Step 5: Fast-path route accepted
         return FastDecisionResult(
             decision_id=decision_id,

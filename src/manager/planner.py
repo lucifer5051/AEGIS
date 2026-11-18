@@ -85,7 +85,33 @@ class StructuredPlanner:
     def __init__(self, provider: LocalReasoningProvider) -> None:
         self.provider = provider
 
-    def generate_plan(self, context_ir: ContextIR, broker: ToolBroker) -> Plan:
+    def validate_synthesis_context(self, synthesis: Any) -> bool:
+        """Inspect synthesis status to distinguish successful AI synthesis from degraded fallback.
+
+        Args:
+            synthesis: String or SynthesisResult object.
+
+        Returns:
+            bool: True if synthesis is valid, non-degraded model output or standard string.
+                  False if synthesis represents degraded fallback output.
+        """
+        if hasattr(synthesis, "is_degraded"):
+            if synthesis.is_degraded:
+                logger.warning(
+                    "StructuredPlanner observed degraded synthesis context (fallback_used=%s, error=%s)",
+                    getattr(synthesis, "fallback_used", True),
+                    getattr(synthesis, "provider_error", None),
+                )
+                return False
+            return True
+        return True
+
+    def generate_plan(
+        self,
+        context_ir: ContextIR,
+        broker: ToolBroker,
+        synthesis: Optional[Any] = None,
+    ) -> Plan:
         """Generate a validated Plan from ContextIR using local reasoning.
 
         On the first validation failure, attempts one repair query with error
@@ -94,6 +120,7 @@ class StructuredPlanner:
         Args:
             context_ir: Bounded context assembly.
             broker: ToolBroker providing the authoritative tool catalog.
+            synthesis: Optional SynthesisResult or summary string from prior task.
 
         Returns:
             Validated Plan instance.
@@ -101,10 +128,77 @@ class StructuredPlanner:
         Raises:
             PlanValidationError: If valid plan cannot be produced or verified.
         """
+        if synthesis is not None:
+            is_valid = self.validate_synthesis_context(synthesis)
+            if not is_valid:
+                logger.warning(
+                    "StructuredPlanner: Planning initiated with degraded synthesis input. "
+                    "Refusing to treat generic fallback as verified model-generated content."
+                )
+
         system_prompt = self._build_system_prompt()
         prompt = self._build_planning_prompt(context_ir, broker)
+        return self._execute_plan_with_repair(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            context_ir=context_ir,
+            broker=broker,
+        )
 
-        # First planning attempt
+    def generate_replan(
+        self,
+        context_ir: ContextIR,
+        broker: ToolBroker,
+        failed_step_description: str,
+        observation_summary: str,
+        completed_step_summaries: List[Dict[str, Any]],
+        synthesis: Optional[Any] = None,
+    ) -> Plan:
+        """Generate a revised validated Plan after a step execution failure or semantic gap.
+
+        Integrates completed steps, the failed step, and empirical observations into the
+        reasoning prompt. Uses bounded repair on validation failure.
+
+        Args:
+            context_ir: ContextIR with updated observation history.
+            broker: ToolBroker for tool definition verification.
+            failed_step_description: Description of the step that produced the failure.
+            observation_summary: Empirical result/observation that triggered replanning.
+            completed_step_summaries: List of dictionaries describing already completed steps.
+            synthesis: Optional SynthesisResult or summary string from previous step.
+
+        Returns:
+            Validated Plan representing the remaining steps to achieve the goal.
+
+        Raises:
+            PlanValidationError: If the revised plan fails validation and cannot be repaired.
+        """
+        if synthesis is not None:
+            self.validate_synthesis_context(synthesis)
+
+        system_prompt = self._build_system_prompt()
+        prompt = self._build_replan_prompt(
+            context=context_ir,
+            broker=broker,
+            failed_step_description=failed_step_description,
+            observation_summary=observation_summary,
+            completed_step_summaries=completed_step_summaries,
+        )
+        return self._execute_plan_with_repair(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            context_ir=context_ir,
+            broker=broker,
+        )
+
+    def _execute_plan_with_repair(
+        self,
+        prompt: str,
+        system_prompt: str,
+        context_ir: ContextIR,
+        broker: ToolBroker,
+    ) -> Plan:
+        """Execute a planning query with one bounded repair attempt on validation failure."""
         req = ReasoningRequest(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -291,11 +385,28 @@ class StructuredPlanner:
 
         tools_catalog = "\n".join(tools_summary)
 
+        lessons_section = ""
+        if context.relevant_lessons:
+            lesson_lines = []
+            for les in context.relevant_lessons[:5]:
+                risk_str = getattr(les, "risk_level", "LOW")
+                lesson_lines.append(
+                    f"- [{les.lesson_id[:8]}] {les.title} (Risk: {risk_str}):\n"
+                    f"  Trigger: {les.trigger_condition}\n"
+                    f"  Action: {les.recommended_action}\n"
+                    f"  Observed: {les.observation}"
+                )
+            lessons_section = (
+                f"\n\nOPERATIONAL LESSONS FROM PAST EXPERIENCE (ADVISORY):\n"
+                + "\n".join(lesson_lines)
+            )
+
         return (
             f"GOAL:\n{context.active_goal}\n\n"
             f"CONSTRAINTS:\n"
             + ("\n".join(f"- {c}" for c in context.constraints) if context.constraints else "None")
-            + f"\n\nAVAILABLE TOOLS:\n{tools_catalog}\n\n"
+            + f"{lessons_section}\n\n"
+            f"AVAILABLE TOOLS:\n{tools_catalog}\n\n"
             "Produce the execution plan as a JSON object with this exact structure:\n"
             "{\n"
             '  "goal": "<user goal>",\n'
@@ -331,3 +442,114 @@ class StructuredPlanner:
             f"PREVIOUS INVALID OUTPUT:\n{failed_output}\n\n"
             "Fix the errors and return ONLY a valid JSON object matching the required schema."
         )
+
+    def _build_replan_prompt(
+        self,
+        context: ContextIR,
+        broker: ToolBroker,
+        failed_step_description: str,
+        observation_summary: str,
+        completed_step_summaries: List[Dict[str, Any]],
+    ) -> str:
+        tools_summary = []
+        for name, tool_def in broker.list_tools().items():
+            param_docs = []
+            for p in tool_def.parameters:
+                req_str = "required" if p.required else "optional"
+                param_docs.append(
+                    f"    - {p.name} ({p.param_type.value}, {req_str}): {p.description}"
+                )
+            params_str = "\n".join(param_docs) if param_docs else "    (no parameters)"
+            tools_summary.append(
+                f"- Tool: {name}\n"
+                f"  Description: {tool_def.description}\n"
+                f"  Risk: {tool_def.risk.value}\n"
+                f"  Parameters:\n{params_str}"
+            )
+
+        tools_catalog = "\n".join(tools_summary)
+
+        completed_section = "None"
+        if completed_step_summaries:
+            from src.manager.context import truncate_tool_output
+
+            completed_lines = []
+            for idx, c in enumerate(completed_step_summaries, start=1):
+                tool = c.get("tool", "unknown")
+                desc = c.get("description", "")
+                result = str(c.get("result_summary", ""))
+                truncated_res = truncate_tool_output(result, max_chars=300)
+                completed_lines.append(f"{idx}. [{tool}] {desc} -> {truncated_res}")
+
+            if len(completed_lines) > 6:
+                older_count = len(completed_lines) - 5
+                completed_lines = [
+                    f"(Steps 1..{older_count} completed successfully)"
+                ] + completed_lines[-5:]
+            completed_section = "\n".join(completed_lines)
+
+        obs_history_section = ""
+        if context.observation_history:
+            selected_obs = (
+                context.observation_history
+                if any(o.startswith("[COMPACTED HISTORY") for o in context.observation_history)
+                else context.observation_history[-5:]
+            )
+            obs_lines = [f"- {o}" for o in selected_obs]
+            obs_history_section = f"\n\nPRIOR OBSERVATIONS:\n" + "\n".join(obs_lines)
+
+        from src.manager.context import truncate_tool_output
+        bounded_obs_summary = truncate_tool_output(observation_summary, max_chars=800)
+
+        lessons_section = ""
+        if context.relevant_lessons:
+            lesson_lines = []
+            for les in context.relevant_lessons[:5]:
+                risk_str = getattr(les, "risk_level", "LOW")
+                lesson_lines.append(
+                    f"- [{les.lesson_id[:8]}] {les.title} (Risk: {risk_str}):\n"
+                    f"  Trigger: {les.trigger_condition}\n"
+                    f"  Action: {les.recommended_action}\n"
+                    f"  Observed: {les.observation}"
+                )
+            lessons_section = (
+                f"\n\nOPERATIONAL LESSONS FROM PAST EXPERIENCE (ADVISORY):\n"
+                + "\n".join(lesson_lines)
+            )
+
+        return (
+            f"GOAL:\n{context.active_goal}\n\n"
+            f"ALREADY COMPLETED WORK (DO NOT REPEAT THESE ACTIONS):\n"
+            f"{completed_section}\n\n"
+            f"STEP THAT FAILED OR REQUIRED REPLAN:\n"
+            f"- Step: {failed_step_description}\n"
+            f"- Observation: {bounded_obs_summary}"
+            f"{obs_history_section}\n\n"
+            f"CONSTRAINTS:\n"
+            + ("\n".join(f"- {c}" for c in context.constraints) if context.constraints else "None")
+            + f"{lessons_section}\n\n"
+            f"AVAILABLE TOOLS:\n{tools_catalog}\n\n"
+            "Produce the revised execution plan for the REMAINING steps to achieve the goal.\n"
+            "Rules:\n"
+            "1. Do NOT repeat completed actions.\n"
+            "2. Address or work around the observed failure.\n"
+            "3. Number new steps starting from 1 sequentially.\n"
+            "4. Return ONLY a JSON object with this exact structure:\n"
+            "{\n"
+            '  "goal": "<user goal>",\n'
+            '  "rationale": "<brief rationale for revised approach>",\n'
+            '  "steps": [\n'
+            "    {\n"
+            '      "step_number": 1,\n'
+            '      "description": "<step description>",\n'
+            '      "tool": "<tool_name>",\n'
+            '      "arguments": { ... },\n'
+            '      "is_idempotent": true|false,\n'
+            '      "acceptance_criteria": "<observable check>",\n'
+            '      "estimated_risk": "LOW"|"MEDIUM"|"HIGH"|"CRITICAL",\n'
+            '      "target_resource": "<target path or resource>"\n'
+            "    }\n"
+            "  ]\n"
+            "}"
+        )
+

@@ -13,7 +13,7 @@ from enum import Enum, unique
 from typing import Any, Dict, FrozenSet, List, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ==============================================================================
 # ENUMERATIONS
@@ -207,6 +207,33 @@ class TaskRecord(BaseModel):
     completed_at: Optional[str] = None
     error_summary: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    parent_task_id: Optional[str] = None
+    root_task_id: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_hierarchy(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            meta = data.get("metadata") or {}
+            if ("parent_task_id" not in data or data["parent_task_id"] is None) and isinstance(meta, dict):
+                data["parent_task_id"] = meta.get("parent_task_id")
+            if ("root_task_id" not in data or data["root_task_id"] is None):
+                if isinstance(meta, dict) and meta.get("root_task_id"):
+                    data["root_task_id"] = meta["root_task_id"]
+                else:
+                    data["root_task_id"] = data.get("parent_task_id") or data.get("task_id")
+        return data
+
+    @property
+    def is_root(self) -> bool:
+        """Return True if this task has no parent and is its own root."""
+        return self.parent_task_id is None or self.parent_task_id == self.task_id
+
+    @property
+    def is_subtask(self) -> bool:
+        """Return True if this task has an immediate parent task."""
+        return not self.is_root
 
     @property
     def execution_mode(self) -> ExecutionMode:
@@ -262,6 +289,36 @@ class CheckpointSnapshot(BaseModel):
     checkpoint_seq: int
     snapshot: Dict[str, Any]
     created_at: str
+    parent_task_id: Optional[str] = None
+    root_task_id: Optional[str] = None
+    execution_id: Optional[str] = None
+    parent_execution_id: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_hierarchy(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            snap = data.get("snapshot")
+            if isinstance(snap, dict):
+                snap = dict(snap)
+                hierarchy = snap.pop("_hierarchy", None)
+                data["snapshot"] = snap
+                if isinstance(hierarchy, dict):
+                    for field in ("parent_task_id", "root_task_id", "execution_id", "parent_execution_id"):
+                        if field not in data or data.get(field) is None:
+                            data[field] = hierarchy.get(field)
+                for field in ("parent_task_id", "root_task_id", "execution_id", "parent_execution_id"):
+                    if (field not in data or data.get(field) is None) and field in snap:
+                        data[field] = snap.get(field)
+            if ("root_task_id" not in data or data["root_task_id"] is None) and data.get("task_id"):
+                data["root_task_id"] = data.get("parent_task_id") or data.get("task_id")
+        return data
+
+    @property
+    def is_root(self) -> bool:
+        """Return True if this checkpoint belongs to a root task."""
+        return self.parent_task_id is None or self.parent_task_id == self.task_id
 
 
 class ReconciledTaskResult(BaseModel):
@@ -275,6 +332,9 @@ class ReconciledTaskResult(BaseModel):
     new_state: TaskState
     action_summary: str
     step_id: Optional[str] = None
+    parent_task_id: Optional[str] = None
+    root_task_id: Optional[str] = None
+    child_task_ids: List[str] = Field(default_factory=list)
 
 
 class ReconciliationReport(BaseModel):

@@ -14,12 +14,18 @@ Invariants:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum, unique
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.storage.trust_levels import MemoryTrustLevel
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class MemoryCategory(str, Enum):
@@ -35,6 +41,83 @@ class MemoryCategory(str, Enum):
     RELATION = "relation"
     EVIDENCE = "evidence"
     SESSION = "session"
+    SEMANTIC = "semantic"
+    EPISODIC = "episodic"
+    PROCEDURAL = "procedural"
+    PERSONAL = "personal"
+    WORKING = "working"
+    RELATIONAL = "relational"
+    KNOWLEDGE = "knowledge"
+    CONCEPT = "concept"
+    INTERACTION = "interaction"
+    WORKFLOW = "workflow"
+    USER_PROFILE = "user_profile"
+    SCRATCHPAD = "scratchpad"
+    ENTITY_RELATION = "entity_relation"
+
+
+@unique
+class CognitiveMemoryCategory(str, Enum):
+    """The 6 fundamental cognitive memory categories in SAGE Unified Memory."""
+
+    SEMANTIC = "semantic"       # Facts, knowledge, concepts, technical domain information
+    EPISODIC = "episodic"       # Conversations, events, decisions, experiences, task history
+    PROCEDURAL = "procedural"   # Workflows, procedures, reusable instructions, lessons
+    PERSONAL = "personal"       # User preferences, goals, relationships, personal context
+    WORKING = "working"         # Active task/conversation temporary context
+    RELATIONAL = "relational"   # Links, connections between entities/people/tasks/memories
+
+
+@unique
+class MemorySensitivity(str, Enum):
+    """Security classification sensitivity tiers for memory access."""
+
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
+
+
+@unique
+class MemoryProvenanceType(str, Enum):
+    """Epistemic provenance origin for a memory record."""
+
+    EXPLICIT_USER = "explicit_user"
+    EXTRACTED = "extracted"
+    INFERRED = "inferred"
+    EXTERNAL = "external"
+    EXECUTION = "execution"
+
+
+def map_to_cognitive_category(category: MemoryCategory | str) -> CognitiveMemoryCategory:
+    """Map any granular or cognitive memory category to its canonical cognitive category."""
+    cat_str = category.value if hasattr(category, "value") else str(category).lower()
+    mapping = {
+        "fact": CognitiveMemoryCategory.SEMANTIC,
+        "semantic": CognitiveMemoryCategory.SEMANTIC,
+        "knowledge": CognitiveMemoryCategory.SEMANTIC,
+        "concept": CognitiveMemoryCategory.SEMANTIC,
+        "decision": CognitiveMemoryCategory.EPISODIC,
+        "experience": CognitiveMemoryCategory.EPISODIC,
+        "interaction": CognitiveMemoryCategory.EPISODIC,
+        "session": CognitiveMemoryCategory.EPISODIC,
+        "episodic": CognitiveMemoryCategory.EPISODIC,
+        "procedure": CognitiveMemoryCategory.PROCEDURAL,
+        "lesson": CognitiveMemoryCategory.PROCEDURAL,
+        "workflow": CognitiveMemoryCategory.PROCEDURAL,
+        "procedural": CognitiveMemoryCategory.PROCEDURAL,
+        "preference": CognitiveMemoryCategory.PERSONAL,
+        "personal": CognitiveMemoryCategory.PERSONAL,
+        "user_profile": CognitiveMemoryCategory.PERSONAL,
+        "working": CognitiveMemoryCategory.WORKING,
+        "scratchpad": CognitiveMemoryCategory.WORKING,
+        "entity": CognitiveMemoryCategory.RELATIONAL,
+        "relation": CognitiveMemoryCategory.RELATIONAL,
+        "entity_relation": CognitiveMemoryCategory.RELATIONAL,
+        "relational": CognitiveMemoryCategory.RELATIONAL,
+        "evidence": CognitiveMemoryCategory.SEMANTIC,
+    }
+    return mapping.get(cat_str, CognitiveMemoryCategory.SEMANTIC)
 
 
 class MemoryScope(str, Enum):
@@ -327,3 +410,200 @@ class RetrievalResult(BaseModel):
     lessons: List[ExecutionLesson] = Field(
         default_factory=list, description="Retrieved approved execution lessons."
     )
+
+
+# ==============================================================================
+# SAGE UNIFIED MEMORY ENGINE DOMAIN MODELS
+# ==============================================================================
+
+
+class MemoryRelationship(BaseModel):
+    """Directed, typed relationship edge between memory records or entities."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    relationship_id: str = Field(
+        default_factory=lambda: str(uuid4()), description="Unique relationship UUID."
+    )
+    source_memory_id: str = Field(default="", description="Origin memory record ID.")
+    target_memory_id: str = Field(default="", description="Destination memory record ID.")
+    source_id: Optional[str] = Field(default=None, description="Alias for source_memory_id.")
+    target_id: Optional[str] = Field(default=None, description="Alias for target_memory_id.")
+    relation_type: str = Field(
+        default="relates_to",
+        description="Relationship type (e.g., associated_with, affects, produced_by, used_in, contradicts, supports, relates_to).",
+    )
+    relationship_type: Optional[str] = Field(
+        default=None, description="Alias for relation_type."
+    )
+    weight: float = Field(default=1.0, ge=0.0, description="Connection strength weight.")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary edge metadata.")
+    created_at: str = Field(
+        default_factory=_utc_now_iso, description="ISO 8601 UTC creation timestamp."
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        object.__setattr__(
+            self,
+            "source_memory_id",
+            self.source_memory_id or self.source_id or "",
+        )
+        object.__setattr__(
+            self,
+            "target_memory_id",
+            self.target_memory_id or self.target_id or "",
+        )
+        object.__setattr__(
+            self,
+            "relation_type",
+            self.relationship_type or self.relation_type,
+        )
+
+
+class UnifiedMemoryRecord(BaseModel):
+    """Unified memory record spanning semantic, episodic, procedural, personal, working, and relational memories."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    memory_id: str = Field(
+        default_factory=lambda: str(uuid4()), description="Unique stable UUID."
+    )
+    category: MemoryCategory = Field(
+        default=MemoryCategory.SEMANTIC, description="Granular memory category."
+    )
+    cognitive_category: CognitiveMemoryCategory = Field(
+        default=CognitiveMemoryCategory.SEMANTIC,
+        description="Top-level cognitive memory category.",
+    )
+    content: str = Field(description="Textual memory representation.")
+    summary: Optional[str] = Field(default=None, description="Concise memory summary if compacted.")
+    subject: Optional[str] = Field(default=None, description="Subject entity or topic.")
+    predicate: Optional[str] = Field(default=None, description="Relationship predicate or property.")
+    source: str = Field(
+        default="system",
+        description="Source channel (conversation, user_explicit, task_execution, tool_result, experience).",
+    )
+    source_reference: Optional[str] = Field(
+        default=None, description="Reference ID of originating task, conversation, or tool."
+    )
+    provenance_type: MemoryProvenanceType = Field(
+        default=MemoryProvenanceType.EXTRACTED, description="Epistemic provenance origin."
+    )
+    provenance: Optional[Any] = Field(
+        default=None, description="Epistemic provenance alias or metadata."
+    )
+    trust_level: MemoryTrustLevel = Field(
+        default=MemoryTrustLevel.M1, description="Provenance trust level (M0-M4)."
+    )
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Epistemic confidence.")
+    importance: float = Field(default=0.5, ge=0.0, le=1.0, description="Prioritized memory weight.")
+    sensitivity: MemorySensitivity = Field(
+        default=MemorySensitivity.INTERNAL, description="Security sensitivity classification."
+    )
+    access_scope: str = Field(
+        default="global",
+        description="Access boundary (global, project:<id>, contact:<jid>, user:<id>).",
+    )
+    owner_id: Optional[str] = Field(
+        default=None, description="Owning user ID or contact JID for private isolation."
+    )
+    project_id: Optional[str] = Field(default=None, description="Project scope, if scoped.")
+    task_id: Optional[str] = Field(default=None, description="Associated task ID, if scoped.")
+    session_id: Optional[str] = Field(default=None, description="Session ID, if scoped.")
+    retention_policy: str = Field(
+        default="permanent", description="Retention rule (permanent, session, 30d, task)."
+    )
+    is_superseded: bool = Field(default=False, description="Whether replaced by newer information.")
+    superseded_by: Optional[str] = Field(default=None, description="ID of successor record.")
+    superseded_reason: Optional[str] = Field(default=None, description="Reason for supersession.")
+    valid_from: str = Field(
+        default_factory=_utc_now_iso, description="ISO 8601 UTC validity start timestamp."
+    )
+    valid_until: Optional[str] = Field(default=None, description="ISO 8601 UTC expiration timestamp.")
+    expires_at: Optional[str] = Field(default=None, description="Alias for valid_until.")
+    tags: Tuple[str, ...] = Field(default_factory=tuple, description="Searchable tag attributes.")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Arbitrary attributes.")
+    created_at: str = Field(
+        default_factory=_utc_now_iso, description="ISO 8601 UTC creation timestamp."
+    )
+    updated_at: str = Field(
+        default_factory=_utc_now_iso, description="ISO 8601 UTC update timestamp."
+    )
+    access_count: int = Field(default=0, ge=0, description="Number of times accessed.")
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.cognitive_category == CognitiveMemoryCategory.SEMANTIC and self.category != MemoryCategory.SEMANTIC:
+            object.__setattr__(self, "cognitive_category", map_to_cognitive_category(self.category))
+        if self.expires_at and not self.valid_until:
+            object.__setattr__(self, "valid_until", self.expires_at)
+        if self.provenance and isinstance(self.provenance, MemoryProvenanceType):
+            object.__setattr__(self, "provenance_type", self.provenance)
+
+
+class UnifiedMemoryQuery(BaseModel):
+    """Unified hybrid memory query supporting lexical, semantic, graph, and identity-scoped search."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query_text: Optional[str] = Field(default=None, description="Query text for lexical/semantic search.")
+    cognitive_categories: Optional[Tuple[CognitiveMemoryCategory, ...]] = Field(
+        default=None, description="Filter by one or more cognitive memory categories."
+    )
+    categories: Optional[Tuple[MemoryCategory, ...]] = Field(
+        default=None, description="Filter by granular categories."
+    )
+    project_id: Optional[str] = Field(default=None, description="Project scope boundary.")
+    task_id: Optional[str] = Field(default=None, description="Task scope boundary.")
+    session_id: Optional[str] = Field(default=None, description="Session scope boundary.")
+    owner_id: Optional[str] = Field(
+        default=None, description="Identity isolation filter (contact JID or user ID)."
+    )
+    access_scope: Optional[str] = Field(
+        default=None, description="Access scope match or contact filter."
+    )
+    min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    min_importance: float = Field(default=0.0, ge=0.0, le=1.0)
+    min_trust_level: Optional[MemoryTrustLevel] = Field(default=None)
+    max_sensitivity: Optional[MemorySensitivity] = Field(default=None)
+    include_superseded: bool = Field(default=False)
+    include_expired: bool = Field(default=False)
+    as_of_time: Optional[str] = Field(default=None)
+    limit: int = Field(default=20, ge=1, le=100)
+    expand_relationships: bool = Field(default=True, description="Whether to traverse connected memory edges.")
+    max_relationship_depth: int = Field(default=1, ge=0, le=3)
+    context_token_budget: Optional[int] = Field(default=None, ge=128, le=32768)
+
+
+class UnifiedRetrievalResult(BaseModel):
+    """Comprehensive result of hybrid unified memory retrieval."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    records: List[UnifiedMemoryRecord] = Field(default_factory=list)
+    query: UnifiedMemoryQuery
+    ranking_scores: Dict[str, float] = Field(default_factory=dict)
+    relationships: List[MemoryRelationship] = Field(default_factory=list)
+    related_records: Dict[str, List[UnifiedMemoryRecord]] = Field(default_factory=dict)
+    unresolved_conflicts: List[Dict[str, Any]] = Field(default_factory=list)
+    provenance_summary: Dict[str, Any] = Field(default_factory=dict)
+    total_found: int = 0
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def composite_scores(self) -> Dict[str, float]:
+        """Alias for ranking_scores."""
+        return self.ranking_scores
+
+    @property
+    def expanded_relationships(self) -> List[MemoryRelationship]:
+        """Alias for relationships."""
+        return self.relationships
+
+    def __iter__(self):
+        return iter(self.records)
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, idx: int) -> UnifiedMemoryRecord:
+        return self.records[idx]
