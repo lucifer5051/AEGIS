@@ -166,6 +166,11 @@ def test_13_no_unexpected_application_source():
     # In Prompt 024, src/memory/ (EKM Memory Runtime) is authorized.
     # In Prompt 027, src/workflow/ and src/scheduler/ are authorized.
     # In Prompt 032, src/gateway/ (Secure Remote-Control Gateway) is authorized.
+    # In Prompt 071, src/models/ (Model Gateway & Routing) is authorized.
+    # In Prompt 075, src/desktop/ (Desktop Awareness) is authorized.
+    # In Prompt 078, src/ui/ (SAGE Technical UI) is authorized.
+    # In Prompt 079, src/brain/ (Central Brain & Multi-Agent) is authorized.
+    # In Prompt 081, src/voice/ (Voice Subsystem) is authorized.
     allowed_subdirs = {
         "config",
         "hardware",
@@ -184,6 +189,12 @@ def test_13_no_unexpected_application_source():
         "notifications",
         "gateway",
         "security",
+        "models",
+        "communication",
+        "desktop",
+        "ui",
+        "brain",
+        "voice",
         "__pycache__",
     }
     for child in src_dir.iterdir():
