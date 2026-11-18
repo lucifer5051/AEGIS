@@ -63,9 +63,22 @@ class CommandRouter:
         raw_text: str,
         sender_id: str,
         chat_id: str,
+        channel: str = "telegram",
     ) -> RouterResponse:
         """Route an authenticated incoming message to its corresponding handler."""
         _check_no_secrets(raw_text)
+
+        # Fail closed on missing, empty, or whitespace sender identity
+        if not sender_id or not sender_id.strip():
+            logger.warning("Rejecting incoming command with missing or empty sender_id.")
+            return RouterResponse(
+                response_text="Authentication failed: missing or empty sender identity."
+            )
+
+        clean_sender_id = sender_id.strip()
+        clean_channel = (channel or "telegram").strip().lower()
+        actor = f"{clean_channel}:{clean_sender_id}"
+
         text = raw_text.strip()
 
         if not text:
@@ -80,7 +93,7 @@ class CommandRouter:
 
         # Dispatch command
         if command == "/start":
-            return self._handle_start(sender_id)
+            return self._handle_start(clean_sender_id)
         elif command == "/help":
             return self._handle_help()
         elif command == "/status":
@@ -88,21 +101,21 @@ class CommandRouter:
         elif command == "/tasks":
             return self._handle_tasks()
         elif command == "/inspect":
-            return self._handle_inspect(args_text)
+            return self._handle_inspect(args_text, actor=actor)
         elif command == "/verify":
-            return self._handle_verify(args_text)
+            return self._handle_verify(args_text, actor=actor)
         elif command == "/diagnose":
-            return self._handle_diagnose(args_text)
+            return self._handle_diagnose(args_text, actor=actor)
         elif command == "/task":
-            return self._handle_task(args_text, sender_id)
+            return self._handle_task(args_text, clean_sender_id, channel=clean_channel)
         elif command == "/confirm":
-            return self._handle_confirm(args_text, sender_id)
+            return self._handle_confirm(args_text, clean_sender_id, channel=clean_channel, actor=actor)
         elif command in ("/cancel", "/stop"):
-            return self._handle_cancel(args_text, sender_id)
+            return self._handle_cancel(args_text, clean_sender_id, channel=clean_channel)
         elif command == "/approve":
-            return self._handle_approve(args_text, sender_id)
+            return self._handle_approve(args_text, clean_sender_id, channel=clean_channel, actor=actor)
         elif command in ("/reject", "/deny"):
-            return self._handle_reject(args_text, sender_id)
+            return self._handle_reject(args_text, clean_sender_id, channel=clean_channel, actor=actor)
         elif command.startswith("/"):
             return RouterResponse(
                 response_text=(
@@ -208,14 +221,14 @@ class CommandRouter:
         lines.append("\n_Use `/status` for health summary or `/task <goal>` to propose work._")
         return RouterResponse(response_text="\n".join(lines))
 
-    def _handle_inspect(self, args_text: str) -> RouterResponse:
+    def _handle_inspect(self, args_text: str, actor: str = "telegram") -> RouterResponse:
         if self._tools is None or self._authority is None:
             return RouterResponse(response_text="Error: Tools or Trust Core unavailable.")
 
         bound_broker = BoundSkillToolBroker(
             self._tools,
             WORKSPACE_INSPECT_MANIFEST,
-            actor="telegram",
+            actor=actor,
         )
         pattern = args_text.strip() or "*"
         args = {"target_dir": str(self._workspace_dir), "max_files": 50}
@@ -243,7 +256,7 @@ class CommandRouter:
             logger.error("Inspect execution error: %s", exc)
             return RouterResponse(response_text=f"Inspection failed: {exc}")
 
-    def _handle_verify(self, args_text: str) -> RouterResponse:
+    def _handle_verify(self, args_text: str, actor: str = "telegram") -> RouterResponse:
         if self._tools is None or self._authority is None:
             return RouterResponse(response_text="Error: Tools or Trust Core unavailable.")
 
@@ -260,7 +273,7 @@ class CommandRouter:
         bound_broker = BoundSkillToolBroker(
             self._tools,
             DEV_VERIFY_MANIFEST,
-            actor="telegram",
+            actor=actor,
         )
         try:
             result = dev_verify_handler(
@@ -283,7 +296,7 @@ class CommandRouter:
             logger.error("Verification execution error: %s", exc)
             return RouterResponse(response_text=f"Verification failed: {exc}")
 
-    def _handle_diagnose(self, args_text: str) -> RouterResponse:
+    def _handle_diagnose(self, args_text: str, actor: str = "telegram") -> RouterResponse:
         if not args_text.strip():
             return RouterResponse(
                 response_text=(
@@ -298,7 +311,7 @@ class CommandRouter:
         bound_broker = BoundSkillToolBroker(
             self._tools,
             RESEARCH_DIAGNOSE_MANIFEST,
-            actor="telegram",
+            actor=actor,
         )
         try:
             result = research_diagnose_handler(
@@ -325,7 +338,7 @@ class CommandRouter:
             logger.error("Diagnosis error: %s", exc)
             return RouterResponse(response_text=f"Diagnosis failed: {exc}")
 
-    def _handle_task(self, goal_text: str, sender_id: str) -> RouterResponse:
+    def _handle_task(self, goal_text: str, sender_id: str, channel: str = "telegram") -> RouterResponse:
         if not goal_text.strip():
             return RouterResponse(
                 response_text=(
@@ -336,7 +349,7 @@ class CommandRouter:
         # 1. Submit goal to Supervisor
         task = self._supervisor.submit_goal(
             goal_text=goal_text.strip(),
-            metadata={"originating_channel": "telegram", "sender_id": sender_id},
+            metadata={"originating_channel": channel, "sender_id": sender_id},
         )
 
         # Propose initial deterministic steps for context understanding briefing
@@ -409,7 +422,14 @@ class CommandRouter:
             completed=False,
         )
 
-    def _handle_confirm(self, args_text: str, sender_id: str) -> RouterResponse:
+    def _handle_confirm(
+        self,
+        args_text: str,
+        sender_id: str,
+        channel: str = "telegram",
+        actor: Optional[str] = None,
+    ) -> RouterResponse:
+        resolved_actor = actor or f"{channel}:{sender_id}"
         task_id = self._resolve_task_id(args_text)
         if not task_id:
             return RouterResponse(
@@ -424,7 +444,7 @@ class CommandRouter:
             # Confirm briefing
             confirmed = self._supervisor.confirm_context_briefing(
                 task_id,
-                confirmation_note=f"Confirmed via Telegram by user {sender_id}.",
+                confirmation_note=f"Confirmed via {channel.capitalize()} by user {sender_id}.",
             )
 
             # If task is in SUBMITTED state and has proposed steps, plan it before executing
@@ -437,7 +457,7 @@ class CommandRouter:
                 self._supervisor.plan_task(task_id, confirmed.proposed_plan)
 
             # Initiate execution
-            exec_task = self._supervisor.execute_task(task_id, actor=f"telegram:{sender_id}")
+            exec_task = self._supervisor.execute_task(task_id, actor=resolved_actor)
 
             status_msg = (
                 f"🚀 *Task `{task_id}` Confirmed & Executed*\n\n"
@@ -460,7 +480,7 @@ class CommandRouter:
                 task_id=task_id,
             )
 
-    def _handle_cancel(self, args_text: str, sender_id: str) -> RouterResponse:
+    def _handle_cancel(self, args_text: str, sender_id: str, channel: str = "telegram") -> RouterResponse:
         task_id = self._resolve_task_id(args_text)
         if not task_id:
             return RouterResponse(
@@ -480,11 +500,11 @@ class CommandRouter:
             briefing = self._supervisor.get_context_briefing(task_id)
             if briefing and briefing.status == BriefingStatus.AWAITING_CONFIRMATION:
                 self._supervisor.cancel_context_briefing(
-                    task_id, reason=f"Cancelled via Telegram by user {sender_id}."
+                    task_id, reason=f"Cancelled via {channel.capitalize()} by user {sender_id}."
                 )
             else:
                 self._supervisor.cancel_task(
-                    task_id, reason=f"Cancelled via Telegram by user {sender_id}."
+                    task_id, reason=f"Cancelled via {channel.capitalize()} by user {sender_id}."
                 )
 
             return RouterResponse(
@@ -495,7 +515,14 @@ class CommandRouter:
         except Exception as exc:
             return RouterResponse(response_text=f"Failed to cancel task `{task_id}`: {exc}")
 
-    def _handle_approve(self, args_text: str, sender_id: str) -> RouterResponse:
+    def _handle_approve(
+        self,
+        args_text: str,
+        sender_id: str,
+        channel: str = "telegram",
+        actor: Optional[str] = None,
+    ) -> RouterResponse:
+        resolved_actor = actor or f"{channel}:{sender_id}"
         req_id = args_text.strip()
         if not req_id:
             return RouterResponse(
@@ -508,7 +535,7 @@ class CommandRouter:
             )
 
         try:
-            record = self._approval_store.approve_request(req_id, actor=f"telegram:{sender_id}")
+            record = self._approval_store.approve_request(req_id, actor=resolved_actor)
             return RouterResponse(
                 response_text=(
                     f"✅ *Approval Request `{req_id[:8]}` Approved*\n\n"
@@ -520,7 +547,14 @@ class CommandRouter:
         except Exception as exc:
             return RouterResponse(response_text=f"Failed to approve request `{req_id}`: {exc}")
 
-    def _handle_reject(self, args_text: str, sender_id: str) -> RouterResponse:
+    def _handle_reject(
+        self,
+        args_text: str,
+        sender_id: str,
+        channel: str = "telegram",
+        actor: Optional[str] = None,
+    ) -> RouterResponse:
+        resolved_actor = actor or f"{channel}:{sender_id}"
         req_id = args_text.strip()
         if not req_id:
             return RouterResponse(
@@ -534,7 +568,7 @@ class CommandRouter:
 
         try:
             record = self._approval_store.reject_request(
-                req_id, actor=f"telegram:{sender_id}", reason="Rejected via Telegram"
+                req_id, actor=resolved_actor, reason=f"Rejected via {channel.capitalize()}"
             )
             return RouterResponse(
                 response_text=(

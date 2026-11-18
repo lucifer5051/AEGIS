@@ -290,7 +290,9 @@ class ChannelGateway:
 
         # 7. Route Command & Execute
         try:
-            router_res = self._router.route(text, sender_id=sender_id_str, chat_id=chat_id)
+            router_res = self._router.route(
+                text, sender_id=sender_id_str, chat_id=chat_id, channel=self._channel
+            )
         except Exception as exc:
             logger.error("Command execution error for update %s: %s", rec.update_id, exc)
             self._store.transition_update_state(
