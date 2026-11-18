@@ -67,6 +67,13 @@ Thumbs.db
 [Dd]esktop.ini
 $RECYCLE.BIN/
 
+# .NET / C# Build artifacts
+[Bb]in/
+[Oo]bj/
+*.pdb
+*.user
+*.suo
+
 # IDE and Editor files
 .idea/
 .vscode/
