@@ -79,3 +79,8 @@ $RECYCLE.BIN/
 .vscode/
 *.swp
 *~
+
+# Node.js and WhatsApp Bridge
+bridge/node_modules/
+whatsapp_session/
+*.whatsapp_session/
