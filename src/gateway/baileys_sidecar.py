@@ -30,7 +30,7 @@ from uuid import uuid4
 
 from src.gateway.contact_alias import CANONICAL_PN_REGEX
 from src.gateway.echo_registry import SelfEchoRegistry
-from src.gateway.errors import GatewayError, TransportError
+from src.gateway.errors import ChannelConfigError as ConfigurationError, GatewayError, TransportError
 from src.gateway.models import OutboundMessage
 from src.gateway.send_authorization import (
     AuthorizationMismatchError,

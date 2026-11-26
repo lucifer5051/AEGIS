@@ -1,0 +1,402 @@
+# SAGE WhatsApp Protected Topics Configuration
+# Lines starting with # are comments.
+# Lines with [category_name] define a category.
+# Following lines until the next category are terms/phrases for that category.
+# Matching is Unicode-normalized (NFKC), casefolded, and zero-width stripped.
+
+[health_and_illness]
+hospital
+doctor
+surgery
+cancer
+heart attack
+illness
+fever
+icu
+emergency
+chemo
+covid
+diagnosed
+diagnosis
+treatment
+admitted
+sick
+disease
+infection
+stroke
+paralysis
+asthma
+diabetes
+kidney failure
+dialysis
+biopsy
+tumor
+dawa
+bimar
+aspataal
+ilaaj
+dawai
+daktar
+rok
+aajaari
+dawaakhana
+rughnalay
+upchaar
+औषध
+दवा
+बीमार
+अस्पताल
+इलाज
+दवाई
+डाक्टर
+रोग
+आजारी
+दवाखाना
+रुग्णालय
+उपचार
+कॅन्सर
+हार्ट अटॅक
+
+[disability]
+disability
+disabled
+handicapped
+wheelchair
+blind
+deaf
+mute
+paralyzed
+amputee
+prosthetic
+autism
+autistic
+adhd
+down syndrome
+special needs
+apang
+viklang
+andha
+behra
+gunga
+divyang
+अपंग
+विकलांग
+अंधा
+बहरा
+गूंगा
+दिव्यांग
+व्हीलचेअर
+
+[mental_health]
+depression
+depressed
+suicide
+suicidal
+anxiety
+panic attack
+trauma
+ptsd
+nervous breakdown
+therapy
+psychiatrist
+psychologist
+bipolar
+schizophrenia
+self harm
+cutting myself
+kill myself
+mental hospital
+tanaav
+paagalpan
+udaas
+chinta
+तनाव
+उदास
+चिंता
+आत्महत्या
+डिप्रेशन
+
+[family]
+family problem
+family fight
+divorce
+custody
+abusive father
+abusive mother
+abusive parents
+disowned
+domestic violence
+ghar ka kalesh
+parivaar
+kautumbik
+वाद
+कलेश
+कौटुंबिक
+घरगुती हिंसाचार
+घटस्फोट
+
+[death_and_grief]
+died
+death
+passed away
+killed
+accident
+injured
+injury
+funeral
+grief
+mourning
+condolences
+rip
+loss of
+cremation
+burial
+mar gaya
+maut
+nidhan
+antim sanskar
+shradhanjali
+bhavpurna
+varasla
+गेला
+वारला
+निधन
+मृत्यू
+शोक
+अंत्यसंस्कार
+श्रद्धांजली
+भावपूर्ण श्रद्धांजली
+अपघात
+जखमी
+
+[money_and_poverty]
+bankruptcy
+bankrupt
+i am broke
+i'm broke
+flat broke
+went broke
+financially broke
+loan default
+eviction
+unemployed
+laid off
+lost my job
+debt
+foreclosure
+starving
+cannot afford
+financial crisis
+poverty
+poor
+no money
+can't pay rent
+karza
+udhaari
+garibi
+paise nahi hai
+karj
+bheek
+दिवाळखोरी
+कर्ज
+उधारी
+गरीब
+पैसे नाहीत
+बेरोजगार
+उपासमार
+
+[body_and_appearance]
+ugly
+fat
+skinny
+bald
+deformed
+body shaming
+weight loss
+weight gain
+anorexia
+bulimia
+motapa
+kaala
+gora
+ जाड
+बारीक
+लठ्ठ
+काळा
+गोरा
+कुरूप
+
+[caste]
+dalit
+brahmin
+kshatriya
+vaishya
+shudra
+untouchable
+casteism
+lower caste
+upper caste
+reservation
+jaati
+jaativad
+bhangi
+chamar
+jaat
+जात
+जातिवाद
+आरक्षण
+दलित
+ब्राह्मण
+
+[religion]
+temple attack
+mosque
+church scandal
+blasphemy
+conversion
+communal
+religious riots
+jihad
+kafir
+hindu muslim
+mob lynching
+dharma
+mandir
+masjid
+dharmiya
+दंगल
+मंदिर
+मशीद
+धर्मांतरण
+धार्मिक हिंसा
+
+[ethnicity]
+racism
+racist
+xenophobia
+ethnic cleansing
+tribal conflict
+goras
+kaale
+adivasi
+naxalite
+वांशिक
+आदिवासी
+
+[gender]
+patriarchy
+misogyny
+sexism
+feminazi
+anti woman
+purush pradhan
+striya
+लिंगभेद
+स्त्रीद्वेष
+पुरुषप्रधान
+
+[sexuality]
+gay
+lesbian
+bisexual
+transgender
+queer
+lgbt
+lgbtq
+homosexual
+homophobia
+hijra
+chakka
+समलैंगिक
+हिजडा
+तृतीयपंथी
+
+[relationships_and_breakups]
+breakup
+broke up
+broken heart
+dumped
+cheating on me
+cheated on me
+affair
+infidelity
+heartbroken
+ex girlfriend
+ex boyfriend
+divorced
+dhokha
+dil toot gaya
+break up
+ब्रेकअप
+धोका दिला
+घटस्फोट
+विश्वासघात
+
+[grades_and_exam_results]
+failed exam
+failed test
+flunked
+bad marks
+low score
+neet result
+jee result
+upsc failed
+board exam failed
+fail ho gaya
+marks kam aaye
+नापास
+गुण कमी
+परीक्षेत नापास
+अनुत्तीर्ण
+
+[vulnerability_and_confiding]
+i am struggling
+i'm struggling
+struggling with
+don't tell anyone
+dont tell anyone
+please keep this between us
+feeling helpless
+i feel so alone
+crying alone
+nobody cares about me
+cannot take this anymore
+can't take this anymore
+want to end it
+help me please
+confide in you
+secret between us
+madad chahiye
+kisi ko mat batana
+himmat haar gaya
+sahan nahi hota
+फार त्रास होतोय
+कोणाला सांगू नको
+मदत हवी आहे
+खूप एकटा वाटतोय
+सहन होत नाही
+
+[politics]
+election
+vote for
+political party
+parliament
+government corruption
+prime minister
+democrat
+republican
+bjp
+congress
+modi
+rahul gandhi
+cm office
+neta
+chunav
+matdan
+rajkaran
+निवडणूक
+मतदान
+राजकारण
+भ्रष्टाचार
+नेता
+सरकार

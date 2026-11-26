@@ -138,6 +138,8 @@ def gateway_setup(test_db_conn):
 
     owner_handler = DefaultOwnerChannelHandler(audit_callback=on_owner_msg)
     audit_writer = AuditWriter(test_db_conn)
+    mock_draft_mgr = MagicMock()
+    mock_draft_mgr.create_draft_for_inbound.return_value = {"card": "[AEGIS] Draft", "draft_id": "test"}
 
     gateway = ChannelGateway(
         config=config,
@@ -148,6 +150,7 @@ def gateway_setup(test_db_conn):
         echo_registry=echo_registry,
         owner_channel_handler=owner_handler,
         audit_writer=audit_writer,
+        draft_manager=mock_draft_mgr,
     )
     return {
         "gateway": gateway,

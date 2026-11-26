@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from src.config.models import TelegramConfig, WhatsAppConfig
@@ -36,7 +37,7 @@ from src.gateway.store import GatewayStore
 from src.gateway.telegram import TelegramAdapter
 from src.gateway.transport import TelegramTransport
 from src.gateway.whatsapp import WhatsAppAdapter
-from src.gateway.whatsapp_transport import WhatsAppTransport
+from src.gateway.whatsapp_transport import SimulatedWhatsAppTransport, WhatsAppTransport
 from src.manager.models import TaskState
 from src.memory.contact_memory import EncryptedContactMemoryStore
 from src.trust.approval import ApprovalStore
@@ -86,7 +87,17 @@ class ChannelGateway:
         self._limiter = rate_limiter or SlidingWindowRateLimiter()
         self._approval_store = approval_store or getattr(router, "_approval_store", None)
         self._contact_memory_store = contact_memory_store
-        self._draft_manager = draft_manager
+        if draft_manager is not None:
+            self._draft_manager = draft_manager
+        elif isinstance(config, WhatsAppConfig) and contact_memory_store is not None and hasattr(contact_memory_store, "_key_store") and hasattr(store, "_conn"):
+            from src.gateway.drafts import DraftManager
+            self._draft_manager = DraftManager(
+                conn=store._conn,
+                key_store=contact_memory_store._key_store,
+                audit_writer=audit_writer,
+            )
+        else:
+            self._draft_manager = None
         self._supervisor = supervisor
         self._channel = "whatsapp" if isinstance(config, WhatsAppConfig) else "telegram"
         if alias_store is not None:
@@ -110,6 +121,7 @@ class ChannelGateway:
             self._adapter = TelegramAdapter(max_message_length=config.max_message_length)
         self._next_offset: Optional[int] = None
         self._running: bool = False
+        self._last_draft_pipeline_notice: float = 0.0
 
     def _audit_drop(self, reason: str, sender_id: str, chat_id: str) -> None:
         masked_sender = mask_phone_number(sender_id)
@@ -537,40 +549,71 @@ class ChannelGateway:
         self._store.transition_update_state(rec.update_id, UpdateLifecycleState.PROCESSING)
 
         # 6. Contact-Scoped Memory Isolation Retrieval & Inbound Processing for WhatsApp
-        contact_memories: List[Dict[str, Any]] = []
         if self._channel == "whatsapp":
-            if self._contact_memory_store is not None:
-                try:
-                    self._contact_memory_store.store_memory(
-                        contact_jid=sender_id_str,
-                        record_type="inbound_message",
-                        content={
-                            "message_id": channel_update_id,
-                            "text": text,
-                            "sender_id": sender_id_str,
-                            "chat_id": chat_id,
-                        },
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to store contact memory for %s: %s", sender_id_str, exc)
+            configured_owner = getattr(self._config, "owner_jid", None)
+            is_owner_sender = (
+                (configured_owner and sender_id_str.lower() == configured_owner.lower())
+                or (parsed.get("is_self_chat") and parsed.get("from_me"))
+                or (configured_owner is None and isinstance(self._transport, SimulatedWhatsAppTransport) and self._contact_memory_store is None)
+            )
 
-                try:
-                    contact_memories = self._contact_memory_store.list_contact_memories(
-                        contact_jid=sender_id_str, limit=5
+            if not is_owner_sender:
+                # 1.1 Non-owner contact message: MUST NEVER reach CommandRouter, central_brain, or ToolBroker
+                if self._draft_manager is None:
+                    # Fail-closed: store nothing extra, audit reason, mark update FAILED.
+                    self._audit_event(
+                        "draft_pipeline_unavailable",
+                        actor=sender_id_str,
+                        telemetry={"reason": "draft_manager_missing"},
                     )
-                    logger.debug(
-                        "Retrieved %d isolated contact memories for %s",
-                        len(contact_memories),
-                        sender_id_str,
+                    now_mono = time.monotonic()
+                    if (now_mono - self._last_draft_pipeline_notice) >= 600:
+                        self._last_draft_pipeline_notice = now_mono
+                        if self._supervisor is not None and hasattr(self._supervisor, "send_owner_notice"):
+                            try:
+                                self._supervisor.send_owner_notice(
+                                    "[AEGIS] Notice: WhatsApp draft pipeline is currently unavailable. Inbound contact messages are not being processed."
+                                )
+                            except Exception as exc:
+                                logger.error("Failed to notify owner of draft pipeline unavailability: %s", exc)
+
+                    self._store.transition_update_state(
+                        rec.update_id,
+                        UpdateLifecycleState.FAILED,
+                        error_summary="draft_pipeline_unavailable",
                     )
-                except Exception as exc:
-                    logger.warning(
-                        "Contact memory retrieval failed for sender %s: %s", sender_id_str, exc
+                    return ProcessResult(
+                        update_id=rec.update_id,
+                        channel_update_id=channel_update_id,
+                        sender_id=sender_id_str,
+                        state=UpdateLifecycleState.FAILED,
+                        error_summary="draft_pipeline_unavailable",
                     )
 
-            # Section A: Contact Path Isolation
-            # Whitelisted contact messages MUST NEVER touch CommandRouter, central_brain, or ToolBroker.
-            if self._draft_manager is not None:
+                # Draft pipeline is available: store contact memory and retrieve context
+                contact_memories: List[Dict[str, Any]] = []
+                if self._contact_memory_store is not None:
+                    try:
+                        self._contact_memory_store.store_memory(
+                            contact_jid=sender_id_str,
+                            record_type="inbound_message",
+                            content={
+                                "message_id": channel_update_id,
+                                "text": text,
+                                "sender_id": sender_id_str,
+                                "chat_id": chat_id,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to store contact memory for contact: %s", exc)
+
+                    try:
+                        contact_memories = self._contact_memory_store.list_contact_memories(
+                            contact_jid=sender_id_str, limit=5
+                        )
+                    except Exception as exc:
+                        logger.warning("Contact memory retrieval failed for contact: %s", exc)
+
                 try:
                     draft_res = self._draft_manager.create_draft_for_inbound(
                         contact_jid=sender_id_str,
@@ -601,20 +644,36 @@ class ChannelGateway:
                     )
                 except Exception as exc:
                     logger.error("Failed to generate draft for inbound message %s: %s", rec.update_id, exc)
+                    self._audit_event(
+                        "draft_pipeline_unavailable",
+                        actor=sender_id_str,
+                        telemetry={"reason": "draft_generation_failed"},
+                    )
+                    now_mono = time.monotonic()
+                    if (now_mono - self._last_draft_pipeline_notice) >= 600:
+                        self._last_draft_pipeline_notice = now_mono
+                        if self._supervisor is not None and hasattr(self._supervisor, "send_owner_notice"):
+                            try:
+                                self._supervisor.send_owner_notice(
+                                    "[AEGIS] Notice: WhatsApp draft pipeline error. Inbound message could not be drafted."
+                                )
+                            except Exception as exc_notify:
+                                logger.error("Failed to notify owner: %s", exc_notify)
+
                     self._store.transition_update_state(
                         rec.update_id,
                         UpdateLifecycleState.FAILED,
-                        error_summary=str(exc),
+                        error_summary="draft_pipeline_unavailable",
                     )
                     return ProcessResult(
                         update_id=rec.update_id,
                         channel_update_id=channel_update_id,
                         sender_id=sender_id_str,
                         state=UpdateLifecycleState.FAILED,
-                        error_summary=str(exc),
+                        error_summary="draft_pipeline_unavailable",
                     )
 
-        # 7. Route Command & Execute
+        # 7. Route Command & Execute (For non-WhatsApp channels e.g. Telegram)
         try:
             router_res = self._router.route(
                 text, sender_id=sender_id_str, chat_id=chat_id, channel=self._channel

@@ -98,6 +98,8 @@ def format_approval_card(
     is_placeholder: bool = True,
     expires_in_hours: int = DEFAULT_EXPIRY_HOURS,
     has_injection_warning: bool = False,
+    banter_suppressed: bool = False,
+    suppression_reason_code: Optional[str] = None,
 ) -> str:
     """Render the standardized WhatsApp approval card posted to the owner's self-chat."""
     last2 = contact_jid.split("@")[0][-2:] if "@" in contact_jid else contact_jid[-2:]
@@ -105,7 +107,12 @@ def format_approval_card(
     sanitized_their = sanitize_card_text(their_text, 500)
     sanitized_draft = sanitize_card_text(draft_text, 500)
     tag = "  (placeholder)" if is_placeholder else ""
-    banter_tag = " [BANTER]" if style_mode == "banter" else ""
+    if banter_suppressed:
+        banter_tag = " [banter suppressed: sensitive topic]"
+    elif style_mode == "banter":
+        banter_tag = " [BANTER]"
+    else:
+        banter_tag = ""
     d_id = draft_id.upper()
     warning_line = "⚠️ WARNING: Possible prompt injection detected in contact message!\n" if has_injection_warning else ""
     return (
@@ -116,6 +123,39 @@ def format_approval_card(
         f'Draft: "{sanitized_draft}"\n'
         f"#approve {d_id} | #edit {d_id} <text> | #reject {d_id}   expires in {expires_in_hours}h"
     )
+
+
+@dataclass(frozen=True)
+class DraftResult:
+    """Structured result of draft generation."""
+
+    text: str
+    effective_mode: str
+    banter_suppressed: bool = False
+    suppression_reason_code: Optional[str] = None
+    injection_flag: bool = False
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.text == other
+        if isinstance(other, DraftResult):
+            return (
+                self.text == other.text
+                and self.effective_mode == other.effective_mode
+                and self.banter_suppressed == other.banter_suppressed
+                and self.suppression_reason_code == other.suppression_reason_code
+                and self.injection_flag == other.injection_flag
+            )
+        return False
+
+    def __len__(self) -> int:
+        return len(self.text)
+
+    def __contains__(self, item: str) -> bool:
+        return item in self.text
+
+    def __str__(self) -> str:
+        return self.text
 
 
 @dataclass(frozen=True)
@@ -132,16 +172,22 @@ class DraftContext:
 class DraftProvider(Protocol):
     """Protocol for generating draft replies."""
 
-    def draft(self, ctx: DraftContext) -> str:
-        """Produce a proposed response string given an isolated contact context."""
+    def draft(self, ctx: DraftContext) -> DraftResult:
+        """Produce a proposed response given an isolated contact context."""
         ...
 
 
 class PlaceholderDraftProvider:
     """Deterministic placeholder draft provider used until local LLM drafting is integrated."""
 
-    def draft(self, ctx: DraftContext) -> str:
-        return "Thank you for your message. (placeholder)"
+    def draft(self, ctx: DraftContext) -> DraftResult:
+        return DraftResult(
+            text="Thank you for your message. (placeholder)",
+            effective_mode=ctx.style_mode,
+            banter_suppressed=False,
+            suppression_reason_code=None,
+            injection_flag=False,
+        )
 
 
 def generate_draft_id(conn: sqlite3.Connection) -> str:
@@ -389,7 +435,29 @@ class DraftManager:
             inbound_text=inbound_text,
             recent_messages=recent_messages or [],
         )
-        draft_text = self._provider.draft(ctx)
+        provider_res = self._provider.draft(ctx)
+        if isinstance(provider_res, DraftResult):
+            draft_res = provider_res
+        elif isinstance(provider_res, str):
+            draft_res = DraftResult(
+                text=provider_res,
+                effective_mode=style_mode,
+                banter_suppressed=False,
+                suppression_reason_code=None,
+                injection_flag=False,
+            )
+        else:
+            draft_res = DraftResult(
+                text=str(provider_res),
+                effective_mode=style_mode,
+            )
+
+        draft_text = draft_res.text
+        effective_mode = draft_res.effective_mode
+        banter_suppressed = draft_res.banter_suppressed
+        suppression_reason_code = draft_res.suppression_reason_code
+        has_inj = draft_res.injection_flag
+
         _check_no_secrets(draft_text)
 
         # 5. Encrypt draft with contact's isolated DEK
@@ -422,34 +490,55 @@ class DraftManager:
                 ),
             )
 
-        from src.gateway.local_draft_provider import check_prompt_injection
+        if not has_inj:
+            from src.gateway.local_draft_provider import check_prompt_injection
+            has_inj, _ = check_prompt_injection(inbound_text)
 
-        has_inj, _ = check_prompt_injection(inbound_text)
         is_ph = isinstance(self._provider, PlaceholderDraftProvider) or "(placeholder)" in draft_text
         card = format_approval_card(
             draft_id=draft_id,
             label=label,
             contact_jid=canonical,
-            style_mode=style_mode,
+            style_mode=effective_mode,
             their_text=inbound_text,
             draft_text=draft_text,
             is_placeholder=is_ph,
             expires_in_hours=DEFAULT_EXPIRY_HOURS,
             has_injection_warning=has_inj,
+            banter_suppressed=banter_suppressed,
+            suppression_reason_code=suppression_reason_code,
         )
 
         last2 = canonical.split("@")[0][-2:]
-        self._audit("draft_created", target_id=draft_id, telemetry={"contact_masked": f"***{last2}", "injection_warning": has_inj})
+        self._audit(
+            "draft_created",
+            target_id=draft_id,
+            telemetry={
+                "contact_masked": f"***{last2}",
+                "effective_mode": effective_mode,
+                "injection_warning": has_inj,
+                "banter_suppressed": banter_suppressed,
+            },
+        )
+        if banter_suppressed:
+            self._audit(
+                "banter_suppressed",
+                target_id=draft_id,
+                telemetry={"reason_code": suppression_reason_code or "sensitive_topic"},
+            )
 
         return {
             "draft_id": draft_id,
             "contact_jid": canonical,
             "label": label,
-            "style_mode": style_mode,
+            "style_mode": effective_mode,
             "draft_text": draft_text,
             "text_sha256": text_sha,
             "card": card,
             "expires_at": expires_at,
+            "banter_suppressed": banter_suppressed,
+            "suppression_reason_code": suppression_reason_code,
+            "injection_warning": has_inj,
             "has_injection_warning": has_inj,
         }
 
