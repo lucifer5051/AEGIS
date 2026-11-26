@@ -97,6 +97,11 @@ def build_whatsapp_parser() -> argparse.ArgumentParser:
     # status
     subparsers.add_parser("status", help="Show WhatsApp gateway and bridge operational status.")
 
+    # smoke-test [--fake] [--model-alias ALIAS]
+    smoke_parser = subparsers.add_parser("smoke-test", help="Run synthetic smoke test on drafting pipeline.")
+    smoke_parser.add_argument("--fake", action="store_true", help="Use scripted fake model for offline/CI testing.")
+    smoke_parser.add_argument("--model-alias", default="local", help="Model alias to test (default: local).")
+
     contacts_parser = subparsers.add_parser("contacts", help="Manage whitelisted contacts.")
     contacts_sub = contacts_parser.add_subparsers(dest="contacts_action")
 
@@ -185,6 +190,10 @@ def handle_whatsapp_cli(argv: list[str]) -> int:
                 migrations_dir=migrations_dir,
                 owner_jid=args.owner_jid,
             )
+
+    elif args.whatsapp_subcommand == "smoke-test":
+        from src.gateway.whatsapp_runtime import run_smoke_test
+        return run_smoke_test(use_fake=args.fake, model_alias=args.model_alias)
 
     if args.whatsapp_subcommand != "contacts" or not args.contacts_action:
         parser.print_help()

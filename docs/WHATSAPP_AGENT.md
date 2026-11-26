@@ -171,6 +171,9 @@ python -m src.cli whatsapp run --simulate [--scenario PATH] [--db-path PATH]
 # Run live WhatsApp supervisor with Baileys bridge
 python -m src.cli whatsapp run [--auth-dir PATH] [--owner-jid JID] [--db-path PATH]
 
+# Run synthetic drafting smoke test (12 test cases)
+python -m src.cli whatsapp smoke-test [--fake] [--model-alias ALIAS]
+
 # Manage whitelisted contacts
 python -m src.cli whatsapp contacts list
 python -m src.cli whatsapp contacts add +919876543210 --label "Alice" --mode banter
@@ -179,10 +182,17 @@ python -m src.cli whatsapp contacts remove +919876543210
 ```
 
 ### 6.2 Preflight Safety Checks (All 7 Must Pass Before Bridge Spawn)
-1. **Database Schema**: Database readable and schema at latest migration version.
-2. **Whitelist Non-Empty**: At least 1 contact whitelisted.
+1. **Database Schema & SQLCipher Encryption**: Database exists, schema at latest version, SQLCipher active, and raw plaintext SQLite reads strictly fail.
+2. **Whitelist Non-Empty & Disjoint**: At least 1 contact whitelisted in `whatsapp_contact_settings`, and owner JID is not whitelisted.
 3. **Owner JID Configured**: Canonical phone number format (`^\d{7,15}@s\.whatsapp\.net$`).
-4. **Node.js Environment**: Node.js >= 18 available on system `PATH`.
+4. **Node.js Environment**: Minimum Node version dynamically resolved from `bridge/package.json` (`>=22`) and verified on `PATH`.
 5. **Bridge Dependencies**: `bridge/node_modules/` present and installed.
-6. **Local Model Verified**: Active model registered as `ProviderType.LOCAL` (refuses cloud routing).
+6. **Local Model Verified & Reachable**: Active model registered as `ProviderType.LOCAL` (refuses cloud routing) and live model gateway health ping completes within 5.0s (skipped in `--simulate`).
 7. **Auth Directory Writable**: Baileys session storage directory permissions verified.
+
+### 6.3 Crisis & Urgent Message Triage
+Inbound messages matching patterns in `config/whatsapp_urgent_phrases.txt` (self-harm, medical emergencies, safety threats, urgent call requests in EN, Hindi, and Marathi) are handled via crisis triage:
+- **Zero Drafts**: No draft row created in `whatsapp_drafts`.
+- **Zero LLM Calls**: ModelGateway is never invoked.
+- **Memory Preserved**: Stored in contact's encrypted memory store.
+- **Direct Owner Alert**: Supervisor delivers `"[AEGIS] URGENT: <label> (...NN) may need you. No draft prepared. Please read their message yourself and reply directly."` (rate-limited to 1 notice per contact per 2 minutes; excess logged to audit telemetry as `rate_limited: True`).

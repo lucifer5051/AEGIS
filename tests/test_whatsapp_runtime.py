@@ -9,15 +9,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.gateway.drafts import DraftManager
 from src.gateway.whatsapp_runtime import (
     get_whatsapp_status,
     mask_jid,
@@ -26,14 +23,7 @@ from src.gateway.whatsapp_runtime import (
     run_simulated_whatsapp,
 )
 from src.models.domain import ModelDescriptor, ProviderType
-from src.security.contact_key_store import ContactKeyStore
-from src.security.dpapi import WindowsDPAPIKeyProtector
 from src.storage.database import initialize_runtime_database
-from src.storage.migrations import (
-    bootstrap_schema_migrations,
-    apply_migrations,
-    load_migrations_from_directory,
-)
 
 
 @pytest.fixture
@@ -608,3 +598,17 @@ def test_mask_jid():
     assert mask_jid("15550100001@s.whatsapp.net") == "...0001@s.whatsapp.net"
     assert mask_jid("12@s.whatsapp.net") == "***@s.whatsapp.net"
     assert mask_jid("") == "<unknown>"
+
+
+def test_smoke_test_cli_fake_passes(capsys):
+    """Verify `whatsapp smoke-test --fake` executes 12 synthetic cases and passes."""
+    from src.cli import handle_whatsapp_cli
+
+    ret = handle_whatsapp_cli(["smoke-test", "--fake"])
+    assert ret == 0
+
+    captured = capsys.readouterr()
+    assert "SAGE WhatsApp Drafting Pipeline Smoke Test (mode: FAKE)" in captured.out
+    assert "Summary: Total: 12, Passed: 12, Failed: 0" in captured.out
+    assert "[12]" in captured.out
+    assert "urgent_message_no_draft" in captured.out
