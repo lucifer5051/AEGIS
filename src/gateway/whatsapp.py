@@ -62,19 +62,38 @@ class WhatsAppAdapter:
                 "Rejected: payload contains placeholder requestId (CVE-2026-48063 mitigation)",
             )
 
-        # 2. Extract key / stanza identifiers
-        key = raw_event.get("key")
-        if not isinstance(key, dict):
-            # Allow flat format for testing convenience
-            remote_jid = raw_event.get("remoteJid") or raw_event.get("chat_id")
-            stanza_id = raw_event.get("id") or raw_event.get("message_id")
-            from_me = raw_event.get("fromMe", False)
-            participant = raw_event.get("participant")
+        # 2. Extract key / stanza identifiers (D9: trust normalized fields over legacy duplicates)
+        if "chat_jid" in raw_event:
+            # Normalized Baileys bridge payload
+            remote_jid = raw_event.get("chat_jid")
+            stanza_id = raw_event.get("id")
+            from_me = bool(raw_event.get("from_me", False))
+            is_self_chat = bool(raw_event.get("is_self_chat", False))
+            participant = None
+            sender_pn = raw_event.get("sender_pn")
+            alt_jid = raw_event.get("alt_jid")
+            text = raw_event.get("text")
+            truncated = bool(raw_event.get("truncated", False))
+            timestamp = raw_event.get("timestamp")
         else:
-            remote_jid = key.get("remoteJid")
-            stanza_id = key.get("id")
-            from_me = key.get("fromMe", False)
-            participant = key.get("participant")
+            # Legacy duplicate or flat event payload format
+            key = raw_event.get("key")
+            if not isinstance(key, dict):
+                remote_jid = raw_event.get("remoteJid") or raw_event.get("chat_id")
+                stanza_id = raw_event.get("id") or raw_event.get("message_id")
+                from_me = raw_event.get("fromMe", False)
+                participant = raw_event.get("participant")
+            else:
+                remote_jid = key.get("remoteJid")
+                stanza_id = key.get("id")
+                from_me = key.get("fromMe", False)
+                participant = key.get("participant")
+            is_self_chat = False
+            sender_pn = None
+            alt_jid = None
+            text = None
+            truncated = False
+            timestamp = raw_event.get("messageTimestamp")
 
         if not remote_jid or not str(remote_jid).strip():
             return False, None, "Missing or empty remoteJid in message"
@@ -82,8 +101,10 @@ class WhatsAppAdapter:
         if not stanza_id or not str(stanza_id).strip():
             return False, None, "Missing or empty message stanza ID"
 
+        # D3: from_me Handling
         if from_me is True:
-            return False, None, "Ignored: message from self (fromMe=True)"
+            if not is_self_chat:
+                return False, None, "Ignored: message from self (fromMe=True)"
 
         remote_jid_str = str(remote_jid).strip()
 
@@ -92,6 +113,7 @@ class WhatsAppAdapter:
         if (
             remote_jid_str.endswith("@g.us")
             or "@broadcast" in remote_jid_str
+            or "@newsletter" in remote_jid_str
             or chat_type in ("group", "broadcast")
             or "group" in remote_jid_str.lower()
         ):
@@ -107,6 +129,7 @@ class WhatsAppAdapter:
         if (
             sender_jid_str.endswith("@g.us")
             or "@broadcast" in sender_jid_str
+            or "@newsletter" in sender_jid_str
             or "group" in sender_jid_str.lower()
         ):
             return (
@@ -116,31 +139,32 @@ class WhatsAppAdapter:
                 "Group senders are strictly prohibited.",
             )
 
-        # 5. Extract message text
-        text: Optional[str] = None
-        message = raw_event.get("message")
-        if isinstance(message, dict):
-            text = message.get("conversation")
-            if not text and isinstance(message.get("extendedTextMessage"), dict):
-                text = message["extendedTextMessage"].get("text")
-        elif isinstance(raw_event.get("text"), str):
-            text = raw_event["text"]
+        # 5. Extract message text (D9: switch to normalized text when available)
+        if text is None:
+            message = raw_event.get("message")
+            if isinstance(message, dict):
+                text = message.get("conversation")
+                if not text and isinstance(message.get("extendedTextMessage"), dict):
+                    text = message["extendedTextMessage"].get("text")
+            elif isinstance(raw_event.get("text"), str):
+                text = raw_event["text"]
 
-        if text is None or not text.strip():
+        if text is None or not str(text).strip():
             return False, None, "Only text messages are currently supported"
 
-        if len(text) > self._max_length:
+        text_str = str(text).strip()
+        if len(text_str) > self._max_length or truncated:
             return (
                 False,
                 None,
-                f"Message length ({len(text)}) exceeds maximum allowed ({self._max_length})",
+                f"Message length ({len(text_str)}) exceeds maximum allowed ({self._max_length})",
             )
 
         # 6. Ensure zero secrets in incoming text
         try:
-            _check_no_secrets(text)
+            _check_no_secrets(text_str)
             for pat in _SECRET_VALUE_PATTERNS:
-                if pat.search(text):
+                if pat.search(text_str):
                     return False, None, "Rejected: payload violates zero-secret invariant"
         except Exception as exc:
             return False, None, f"Rejected: payload violates zero-secret invariant: {exc}"
@@ -154,8 +178,14 @@ class WhatsAppAdapter:
             "chat_type": "private",
             "message_id": str(stanza_id),
             "message_type": "text",
-            "text": text.strip(),
-            "date": raw_event.get("messageTimestamp"),
+            "text": text_str,
+            "date": timestamp,
+            "chat_jid": remote_jid_str,
+            "alt_jid": alt_jid,
+            "sender_pn": sender_pn,
+            "from_me": from_me,
+            "is_self_chat": is_self_chat,
+            "is_owner": bool(from_me and is_self_chat),
         }
         return True, parsed_data, None
 
