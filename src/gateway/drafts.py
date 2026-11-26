@@ -105,10 +105,11 @@ def format_approval_card(
     sanitized_their = sanitize_card_text(their_text, 500)
     sanitized_draft = sanitize_card_text(draft_text, 500)
     tag = "  (placeholder)" if is_placeholder else ""
+    banter_tag = " [BANTER]" if style_mode == "banter" else ""
     d_id = draft_id.upper()
     warning_line = "⚠️ WARNING: Possible prompt injection detected in contact message!\n" if has_injection_warning else ""
     return (
-        f"[AEGIS] Draft #{d_id}{tag}\n"
+        f"[AEGIS] Draft #{d_id}{banter_tag}{tag}\n"
         f"{warning_line}"
         f"From: {display_label} (...{last2})   mode: {style_mode}\n"
         f'They wrote: "{sanitized_their}"\n'

@@ -1,0 +1,48 @@
+# SAGE WhatsApp Banned Terms (Profanity, Abusive, and Derogatory Language)
+# English
+fuck
+fucking
+fucker
+shit
+asshole
+bastard
+bitch
+idiot
+moron
+stupid
+cunt
+dick
+damn
+loser
+retard
+slut
+whore
+
+# Hindi (transliterated)
+chutiya
+chutiye
+bhenchod
+behenchod
+madarchod
+bhosadike
+bsdk
+harami
+kamina
+kutta
+saala
+saale
+gaand
+gandu
+randi
+bhadwa
+
+# Marathi (transliterated)
+zavadya
+bhikarchot
+aai ghalya
+lavdya
+yedzava
+aai zavli
+chavat
+faltu
+bokachya
