@@ -246,6 +246,41 @@ class ChannelGateway:
         # 1. Update structure validation (human sender, private chat, length, zero-secret)
         is_valid, parsed, reject_reason = self._adapter.parse_update(raw_update)
         if not is_valid or parsed is None:
+            # 2.7: Owner message directly to whitelisted contact (from_me=True, is_self_chat=False)
+            # Store in contact's encrypted memory so context builder has both sides of conversation.
+            if self._channel == "whatsapp" and self._contact_memory_store is not None:
+                is_from_me = bool(raw_update.get("from_me") or (raw_update.get("key") and raw_update["key"].get("fromMe")))
+                is_self = bool(raw_update.get("is_self_chat"))
+                if is_from_me and not is_self:
+                    target_chat = raw_update.get("chat_jid") or raw_update.get("remoteJid") or (raw_update.get("key") and raw_update["key"].get("remoteJid"))
+                    out_text = raw_update.get("text")
+                    if target_chat and out_text:
+                        canonical_target = None
+                        if CANONICAL_PN_REGEX.match(target_chat):
+                            canonical_target = target_chat
+                        elif target_chat.endswith("@lid") and self._alias_store:
+                            canonical_target = self._alias_store.get_canonical_pn(target_chat)
+                        if canonical_target and canonical_target in self.allowed_jids:
+                            try:
+                                self._contact_memory_store.store_memory(
+                                    contact_jid=canonical_target,
+                                    record_type="owner_message",
+                                    content={
+                                        "message_id": str(raw_uid or raw_update.get("id")),
+                                        "text": out_text,
+                                        "from_me": True,
+                                        "chat_id": target_chat,
+                                    },
+                                )
+                                last2 = canonical_target.split("@")[0][-2:]
+                                self._audit_event(
+                                    "owner_message_stored",
+                                    actor="owner",
+                                    telemetry={"contact": f"***{last2}", "text_length": len(out_text)},
+                                )
+                            except Exception as exc:
+                                logger.warning("Failed to store owner message for %s: %s", canonical_target, exc)
+
             logger.warning("Inbound update %r rejected: %s", raw_uid, reject_reason)
             self._audit_drop(reject_reason or "validation_failed", "unknown", "unknown")
             return ProcessResult(

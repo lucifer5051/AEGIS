@@ -97,6 +97,7 @@ def format_approval_card(
     draft_text: str,
     is_placeholder: bool = True,
     expires_in_hours: int = DEFAULT_EXPIRY_HOURS,
+    has_injection_warning: bool = False,
 ) -> str:
     """Render the standardized WhatsApp approval card posted to the owner's self-chat."""
     last2 = contact_jid.split("@")[0][-2:] if "@" in contact_jid else contact_jid[-2:]
@@ -105,8 +106,10 @@ def format_approval_card(
     sanitized_draft = sanitize_card_text(draft_text, 500)
     tag = "  (placeholder)" if is_placeholder else ""
     d_id = draft_id.upper()
+    warning_line = "⚠️ WARNING: Possible prompt injection detected in contact message!\n" if has_injection_warning else ""
     return (
         f"[AEGIS] Draft #{d_id}{tag}\n"
+        f"{warning_line}"
         f"From: {display_label} (...{last2})   mode: {style_mode}\n"
         f'They wrote: "{sanitized_their}"\n'
         f'Draft: "{sanitized_draft}"\n'
@@ -418,6 +421,9 @@ class DraftManager:
                 ),
             )
 
+        from src.gateway.local_draft_provider import check_prompt_injection
+
+        has_inj, _ = check_prompt_injection(inbound_text)
         is_ph = isinstance(self._provider, PlaceholderDraftProvider) or "(placeholder)" in draft_text
         card = format_approval_card(
             draft_id=draft_id,
@@ -428,10 +434,11 @@ class DraftManager:
             draft_text=draft_text,
             is_placeholder=is_ph,
             expires_in_hours=DEFAULT_EXPIRY_HOURS,
+            has_injection_warning=has_inj,
         )
 
         last2 = canonical.split("@")[0][-2:]
-        self._audit("draft_created", target_id=draft_id, telemetry={"contact_masked": f"***{last2}"})
+        self._audit("draft_created", target_id=draft_id, telemetry={"contact_masked": f"***{last2}", "injection_warning": has_inj})
 
         return {
             "draft_id": draft_id,
@@ -442,6 +449,7 @@ class DraftManager:
             "text_sha256": text_sha,
             "card": card,
             "expires_at": expires_at,
+            "has_injection_warning": has_inj,
         }
 
     def get_draft(self, draft_id: str) -> Optional[Dict[str, Any]]:
