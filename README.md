@@ -1,7 +1,7 @@
 # SAGE — System for Autonomous Guidance & Execution
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
-[![Tests Passing](https://img.shields.io/badge/tests-1148%20passed-brightgreen.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-1291%20passed-brightgreen.svg)]()
 [![Platform: Windows 11](https://img.shields.io/badge/platform-Windows%2011%20(64--bit)-lightgrey.svg)]()
 [![License: Proprietary / Evaluative](https://img.shields.io/badge/license-Proprietary-red.svg)]()
 
@@ -294,7 +294,7 @@ SAGE includes communication gateway abstractions (`src/communication/`, `src/gat
 | **Local GGUF (llama.cpp)** | **Implemented & Verified** | High-performance quantized local inference via llama.cpp. |
 | **Ollama Daemon Adapter** | **Implemented & Verified** | Local daemon connection with offline discovery failover. |
 | **Cloud Gateways (Gemini/OpenAI/Anthropic)** | **Implemented** | Cloud provider adapters; requires user-provided API keys. |
-| **WhatsApp Transport** | **Architecture & Protocol Implemented** | Node.js Baileys sidecar bridge with isolated contact memory namespaces. |
+| **WhatsApp Transport** | **Fully Implemented & Verified** | Local-first autonomous agent with Baileys bridge, local-only drafting, injection defense, 16 protected topics, and owner self-chat approval. See [WhatsApp Agent Architecture](docs/WHATSAPP_AGENT.md). |
 | **Telegram Adapter** | **Designed / Stubbed** | Extensible bot adapter interface ready for deployment. |
 
 ---
@@ -387,7 +387,12 @@ pytest tests/test_trust_core.py -v
 pytest tests/test_model_gateway.py -v
 ```
 
-**Verification Status**: **1,148 passed, 3 skipped, 0 failures** across 1,151 collected tests.
+**Verification Status**: **1,291 passed, 5 skipped, 0 failures** across 1,296 collected tests (plus 32 Node.js bridge tests).
+
+### Documentation References
+- [WhatsApp Autonomous Agent Architecture](docs/WHATSAPP_AGENT.md)
+- [Research Foundations & Related Work](docs/RELATED_WORK.md)
+- [AEGIS Project State & Historical Ledger](docs/AEGIS_PROJECT_STATE.md)
 
 ---
 

@@ -4630,4 +4630,70 @@ Transform SAGE into an intelligent, multi-agent desktop workstation with dynamic
 - Bridge test suite (`bridge/`): **32 passed, 0 failed**
 - Full test suite: **1,226 passed, 5 skipped, 0 failed** (1,231 total collected, 100% offline)
 
+---
+
+# MILESTONE 083: SECURITY AUDIT HARDENING, RUNTIME WIRING & REPOSITORY HYGIENE
+
+**Date:** 2026-11-26  
+**Tasks:** Prompt 8 (Phases 1, 2, and 3)  
+**Status:** COMPLETE & VERIFIED  
+
+## 1. Summary of Completed Phases
+
+### Phase 1: Security Audit Hardening & Zero-Leak Enforcement
+- **Fail-Closed Non-Owner Contact Path (1.1)**: Under zero conditions can an external contact message reach `CommandRouter`, `central_brain`, or `ToolBroker`. If `DraftManager` is unavailable or `create_draft_for_inbound` raises, the pipeline fails closed, marks the update `FAILED`, records a `draft_pipeline_unavailable` audit event, and throttles owner alerts to at most once per 10 minutes.
+- **Data-Driven Protected Topics (1.2)**: Externalized to `config/whatsapp_protected_topics.txt` spanning 16 sensitive categories across English, Hindi (Latin & Devanagari), and Marathi (Latin & Devanagari). Expanded screening scope covers inbound message, retrieved conversation history, and generated draft text.
+- **Structured DraftResult (1.3)**: `DraftResult` dataclass encapsulates `text`, `effective_mode`, `banter_suppressed`, `suppression_reason_code`, and `injection_flag` while providing backwards-compatible string methods (`__str__`, `__len__`, `__eq__`, `__contains__`).
+- **Enhanced Output Validation (1.4)**: Rejects drafts leaking the spotlighting nonce, quoting role-labels (`Assistant:`, `Human:`) at line starts, echoing internal delimiter tags (`<<<`, `>>>`), or reproducing 8+ word fragments from the system prompt. Role lines in conversation history are neutralized.
+- **Phone Entity Normalization (1.5)**: Normalizes phone numbers with 7+ digits across 9+ international, local, dotted, dashed, parenthesized, and Devanagari numeral formats. Rejects drafts introducing unauthorized phone numbers.
+- **Unicode-Aware Banned Terms Matching (1.6)**: Unicode normalization (NFKC, casefold, zero-width stripping), leetspeak and spacing/repetition resilience without Scunthorpe false positives. Redacts matched words in audit logs and loggers.
+- **Logging Canary Verification (1.7)**: Zero canary tokens leak into logs, SQLite audit records, or trace outputs. Tested with 51 unit tests in `tests/test_whatsapp_security_hardening.py`.
+- **Checkpoint 1 Pushed**: Commit `6495a49` pushed to `origin/main`.
+
+### Phase 2: Runtime Entry Point, Preflights, Lifecycle & Simulation
+- **Runnable Entry Point (`src/cli.py`, `src/gateway/whatsapp_runtime.py`)**:
+  - `python -m src.cli whatsapp run [--simulate] [--auth-dir PATH] [--scenario PATH] [--db-path PATH]`
+  - `python -m src.cli whatsapp status`
+  - `python -m src.cli whatsapp contacts list|add|remove|mode`
+- **7 Preflight Safety Checks (`run_preflight`)**:
+  1. Database readable and schema at latest migration version.
+  2. At least one contact whitelisted.
+  3. Owner JID configured and valid (`^\d{7,15}@s\.whatsapp\.net$`).
+  4. Node.js >= 18 on system `PATH`.
+  5. `bridge/node_modules/` exists.
+  6. Local model available and verified local (`ProviderType.LOCAL`; refuses cloud endpoints).
+  7. Auth state directory writable.
+- **Main Run Loop & Lifecycle Management (`run_live_whatsapp`)**:
+  - Wires SQLite stores, DPAPI key stores, `EncryptedContactMemoryStore`, `DraftManager`, `LocalDraftProvider`, `BaileysSidecarSupervisor`, `ChannelGateway`, and `OwnerCommandHandler`.
+  - `WhatsAppSweeperThread`: Background worker expiring pending drafts older than expiry window every 60 seconds.
+  - Bridge crash backoff: Exponential backoff up to 60s, terminating after 5 consecutive failures with owner alert.
+  - Graceful shutdown: Handles SIGINT / SIGTERM, stops sweeper, stops Baileys sidecar (waiting up to 5s before SIGKILL), and closes database connection.
+- **Scripted Demo Scenario (`--simulate`)**:
+  - 5-turn scenario in `tests/data/whatsapp_demo_scenario.json` exercising normal banter, prompt injection defense, sensitive topic suppression, owner `#list`, and owner `#approve <ID>`.
+  - Runs 100% offline via `SimulatedWhatsAppTransport` with fake local model, asserting 0 unsanctioned sends.
+- **Phase 2 Tests**: 14 tests in `tests/test_whatsapp_runtime.py` covering all preflight failure modes, status reporting, full simulation, clean shutdown, crash backoff, and local model refusal.
+- **Phase 2 Committed**: Commit `ad028d2`.
+
+### Phase 3: Repository Hygiene & Architecture Documentation
+- **Cleaned Up `resrch papers/`**: Removed 47 binary PDF files from git index (`git rm -r --cached "resrch papers"`). Preserved `.gitignore` rule.
+- **Curated Related Work (`docs/RELATED_WORK.md`)**: Full structured catalog of all 47 research papers grouped by topic (Prompt Injection Defense, Multi-Agent Coordination, Reasoning & Verification, Agent Memory).
+- **Comprehensive Documentation (`docs/WHATSAPP_AGENT.md`)**: Architectural diagrams, threat model, approval state machine, banter style guide, CLI reference, and prompt-driven autonomous provenance note. Linked in `README.md`.
+
+## 2. Invariants Preserved
+- **Authoritative TrustCore**: Zero unapproved outbound dispatches; 0 unsanctioned sends.
+- **Zero Cloud Leakage**: Contact messages never route to remote or cloud endpoints.
+- **100% Offline Testing**: Fully offline execution in Python 3.12 venv.
+- **Strict Cryptographic Isolation**: Per-contact AES-256-GCM DEKs with DPAPI protection.
+
+## 3. Test Verification
+- `tests/test_whatsapp_security_hardening.py`: **51 passed**
+- `tests/test_whatsapp_runtime.py`: **14 passed**
+- `tests/test_whatsapp_draft_approval.py`: **30 passed**
+- `tests/test_whatsapp_local_draft.py`: **15 passed**
+- `tests/test_whatsapp_banter.py`: **20 passed**
+- `tests/test_whatsapp_bridge_wiring.py`: **15 passed**
+- Node bridge tests (`bridge/test/*.test.js`): **32 passed, 0 failed**
+- Full pytest test suite: **1,291 passed, 5 skipped, 0 failed** (1,296 total collected)
+
+
 
