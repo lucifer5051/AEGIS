@@ -74,8 +74,204 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_whatsapp_parser() -> argparse.ArgumentParser:
+    """Build parser for SAGE WhatsApp administrative CLI."""
+    parser = argparse.ArgumentParser(
+        prog="sage whatsapp",
+        description="SAGE WhatsApp Whitelist & Contact Management",
+    )
+    parser.add_argument(
+        "--db-path",
+        default=None,
+        help="Override runtime SQLite DB path.",
+    )
+    subparsers = parser.add_subparsers(dest="whatsapp_subcommand")
+
+    contacts_parser = subparsers.add_parser("contacts", help="Manage whitelisted contacts.")
+    contacts_sub = contacts_parser.add_subparsers(dest="contacts_action")
+
+    # list
+    contacts_sub.add_parser("list", help="List all whitelisted WhatsApp contacts.")
+
+    # add <number> [--label NAME] [--mode {normal,banter}]
+    add_parser = contacts_sub.add_parser("add", help="Add a contact to the whitelist.")
+    add_parser.add_argument("number", help="Phone number or canonical JID of the contact.")
+    add_parser.add_argument("--label", default=None, help="Display label/name for the contact.")
+    add_parser.add_argument(
+        "--mode",
+        choices=["normal", "banter"],
+        default="normal",
+        help="Drafting style mode (default: normal).",
+    )
+
+    # remove <number>
+    remove_parser = contacts_sub.add_parser("remove", help="Remove a contact from the whitelist.")
+    remove_parser.add_argument("number", help="Phone number or canonical JID of the contact.")
+
+    # mode <number> <normal|banter>
+    mode_parser = contacts_sub.add_parser("mode", help="Change drafting style mode for a contact.")
+    mode_parser.add_argument("number", help="Phone number or canonical JID of the contact.")
+    mode_parser.add_argument("style_mode", choices=["normal", "banter"], help="Drafting style mode.")
+
+    return parser
+
+
+def normalize_cli_contact_input(raw: str) -> str:
+    """Normalize user CLI contact input (e.g. '+91 98765 43210' or '1234567890@s.whatsapp.net')."""
+    from src.security.contact_key_store import normalize_and_validate_contact_jid
+
+    cleaned = (raw or "").strip()
+    if "@" in cleaned:
+        return normalize_and_validate_contact_jid(cleaned)
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    return normalize_and_validate_contact_jid(f"{digits}@s.whatsapp.net")
+
+
+def handle_whatsapp_cli(argv: list[str]) -> int:
+    """Handle SAGE WhatsApp contact CLI invocations."""
+    parser = build_whatsapp_parser()
+    args = parser.parse_args(argv)
+
+    if not args.whatsapp_subcommand or args.whatsapp_subcommand != "contacts" or not args.contacts_action:
+        parser.print_help()
+        return 0
+
+    from datetime import datetime, timezone
+    from src.security.contact_key_store import ContactKeyStore
+    from src.security.dpapi import WindowsDPAPIKeyProtector
+    from src.storage.database import initialize_runtime_database
+    from src.gateway.drafts import DraftManager
+    from src.gateway.baileys_sidecar import generate_allowlist_file
+    from src.config.models import MAX_WHATSAPP_CONTACTS
+
+    db_path = Path(args.db_path) if args.db_path else _get_runtime_db_path()
+    migrations_dir = _get_migrations_dir()
+    conn = initialize_runtime_database(db_path, migrations_dir=migrations_dir)
+    key_store = ContactKeyStore(conn, WindowsDPAPIKeyProtector())
+    draft_manager = DraftManager(conn, key_store)
+
+    action = args.contacts_action
+
+    if action == "list":
+        cur = conn.execute(
+            "SELECT contact_jid, label, style_mode, updated_at FROM whatsapp_contact_settings ORDER BY contact_jid"
+        )
+        rows = cur.fetchall()
+        if not rows:
+            print("No whitelisted WhatsApp contacts found.")
+            return 0
+        print(f"Whitelisted WhatsApp Contacts ({len(rows)}/{MAX_WHATSAPP_CONTACTS}):")
+        for idx, (c_jid, label, style_mode, up_at) in enumerate(rows, 1):
+            lbl = f" ({label})" if label else ""
+            print(f"  {idx}. {c_jid}{lbl} - mode: {style_mode}")
+        return 0
+
+    elif action == "add":
+        try:
+            canonical_jid = normalize_cli_contact_input(args.number)
+        except Exception as exc:
+            print(f"[ERROR] Invalid contact number/JID: {exc}", file=sys.stderr)
+            return 1
+
+        # Check contact cap
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM whatsapp_contact_settings WHERE contact_jid != ?",
+            (canonical_jid,),
+        )
+        count = cur.fetchone()[0]
+        if count >= MAX_WHATSAPP_CONTACTS:
+            print(f"[ERROR] Cannot add contact: whitelist limit of {MAX_WHATSAPP_CONTACTS} contacts reached.", file=sys.stderr)
+            return 1
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO whatsapp_contact_settings (
+                    contact_jid, label, style_mode, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(contact_jid) DO UPDATE SET
+                    label = COALESCE(excluded.label, whatsapp_contact_settings.label),
+                    style_mode = excluded.style_mode,
+                    updated_at = excluded.updated_at
+                """,
+                (canonical_jid, args.label, args.mode, now_iso),
+            )
+
+        # Regenerate allowlist
+        cur = conn.execute("SELECT contact_jid FROM whatsapp_contact_settings ORDER BY contact_jid")
+        all_jids = [r[0] for r in cur.fetchall()]
+        try:
+            generate_allowlist_file(all_jids)
+        except Exception as exc:
+            logger.warning("Could not regenerate allowlist file: %s", exc)
+
+        print(f"Added {canonical_jid} to whitelist (mode: {args.mode}). Whitelist edits take effect on gateway restart.")
+        conn.close()
+        return 0
+
+    elif action == "remove":
+        try:
+            canonical_jid = normalize_cli_contact_input(args.number)
+        except Exception as exc:
+            print(f"[ERROR] Invalid contact number/JID: {exc}", file=sys.stderr)
+            conn.close()
+            return 1
+
+        with conn:
+            conn.execute(
+                "DELETE FROM whatsapp_contact_settings WHERE contact_jid = ?",
+                (canonical_jid,),
+            )
+
+        cancelled_count = draft_manager.cancel_drafts_for_contact(canonical_jid)
+
+        cur = conn.execute("SELECT contact_jid FROM whatsapp_contact_settings ORDER BY contact_jid")
+        all_jids = [r[0] for r in cur.fetchall()]
+        try:
+            generate_allowlist_file(all_jids)
+        except Exception as exc:
+            logger.warning("Could not regenerate allowlist file: %s", exc)
+
+        print(f"Removed {canonical_jid} from whitelist. Cancelled {cancelled_count} pending draft(s). Whitelist edits take effect on gateway restart.")
+        conn.close()
+        return 0
+
+    elif action == "mode":
+        try:
+            canonical_jid = normalize_cli_contact_input(args.number)
+        except Exception as exc:
+            print(f"[ERROR] Invalid contact number/JID: {exc}", file=sys.stderr)
+            conn.close()
+            return 1
+
+        cur = conn.execute("SELECT contact_jid FROM whatsapp_contact_settings WHERE contact_jid = ?", (canonical_jid,))
+        if not cur.fetchone():
+            print(f"[ERROR] Contact {canonical_jid} is not in the whitelist.", file=sys.stderr)
+            conn.close()
+            return 1
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with conn:
+            conn.execute(
+                "UPDATE whatsapp_contact_settings SET style_mode = ?, updated_at = ? WHERE contact_jid = ?",
+                (args.style_mode, now_iso, canonical_jid),
+            )
+
+        print(f"Updated drafting mode for {canonical_jid} to '{args.style_mode}'. Whitelist edits take effect on gateway restart.")
+        conn.close()
+        return 0
+
+    conn.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI main entry point. Returns exit code."""
+    raw_args = list(sys.argv[1:]) if argv is None else list(argv)
+    if raw_args and raw_args[0] == "whatsapp":
+        return handle_whatsapp_cli(raw_args[1:])
+
     parser = build_argument_parser()
     args = parser.parse_args(argv)
 

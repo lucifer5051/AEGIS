@@ -21,12 +21,15 @@ import os
 from typing import Any, Dict, List, Optional, Union
 
 from src.config.models import TelegramConfig, WhatsAppConfig
+from src.gateway.contact_alias import CANONICAL_PN_REGEX, ContactAliasStore
+from src.gateway.echo_registry import SelfEchoRegistry
 from src.gateway.errors import ChannelConfigError, TransportError
 from src.gateway.models import (
     OutboundStatus,
     ProcessResult,
     UpdateLifecycleState,
 )
+from src.gateway.owner_channel import DefaultOwnerChannelHandler, OwnerChannelHandler
 from src.gateway.rate_limiter import SlidingWindowRateLimiter
 from src.gateway.router import CommandRouter
 from src.gateway.store import GatewayStore
@@ -37,8 +40,23 @@ from src.gateway.whatsapp_transport import WhatsAppTransport
 from src.manager.models import TaskState
 from src.memory.contact_memory import EncryptedContactMemoryStore
 from src.trust.approval import ApprovalStore
+from src.trust.audit import AuditDecision, AuditEventType, AuditWriter
 
 logger = logging.getLogger(__name__)
+
+
+def mask_phone_number(jid_or_phone: str) -> str:
+    """Mask phone number in JID or string to last 2 digits for privacy."""
+    if not jid_or_phone or not isinstance(jid_or_phone, str):
+        return "unknown"
+    parts = jid_or_phone.split("@")
+    pn = parts[0]
+    suffix = f"@{parts[1]}" if len(parts) > 1 else ""
+    if len(pn) <= 2:
+        masked_pn = "**"
+    else:
+        masked_pn = "*" * (len(pn) - 2) + pn[-2:]
+    return f"{masked_pn}{suffix}"
 
 
 class ChannelGateway:
@@ -54,6 +72,12 @@ class ChannelGateway:
         adapter: Optional[Union[TelegramAdapter, WhatsAppAdapter]] = None,
         approval_store: Optional[ApprovalStore] = None,
         contact_memory_store: Optional[EncryptedContactMemoryStore] = None,
+        alias_store: Optional[ContactAliasStore] = None,
+        echo_registry: Optional[SelfEchoRegistry] = None,
+        owner_channel_handler: Optional[OwnerChannelHandler] = None,
+        audit_writer: Optional[AuditWriter] = None,
+        draft_manager: Optional[Any] = None,
+        supervisor: Optional[Any] = None,
     ) -> None:
         self._config = config
         self._store = store
@@ -62,7 +86,22 @@ class ChannelGateway:
         self._limiter = rate_limiter or SlidingWindowRateLimiter()
         self._approval_store = approval_store or getattr(router, "_approval_store", None)
         self._contact_memory_store = contact_memory_store
+        self._draft_manager = draft_manager
+        self._supervisor = supervisor
         self._channel = "whatsapp" if isinstance(config, WhatsAppConfig) else "telegram"
+        if alias_store is not None:
+            self._alias_store: Optional[ContactAliasStore] = alias_store
+        elif hasattr(store, "_conn"):
+            self._alias_store = ContactAliasStore(store._conn)
+        else:
+            self._alias_store = None
+        self._echo_registry = echo_registry if echo_registry is not None else SelfEchoRegistry()
+        self._owner_channel_handler = (
+            owner_channel_handler
+            if owner_channel_handler is not None
+            else DefaultOwnerChannelHandler()
+        )
+        self._audit_writer = audit_writer
         if adapter is not None:
             self._adapter = adapter
         elif self._channel == "whatsapp":
@@ -71,6 +110,69 @@ class ChannelGateway:
             self._adapter = TelegramAdapter(max_message_length=config.max_message_length)
         self._next_offset: Optional[int] = None
         self._running: bool = False
+
+    def _audit_drop(self, reason: str, sender_id: str, chat_id: str) -> None:
+        masked_sender = mask_phone_number(sender_id)
+        masked_chat = mask_phone_number(chat_id)
+        logger.info(
+            "Audit drop: reason=%s, sender=%s, chat=%s",
+            reason,
+            masked_sender,
+            masked_chat,
+        )
+        if self._audit_writer is not None:
+            try:
+                self._audit_writer.write(
+                    event_type=AuditEventType.AUTHZ_DECISION,
+                    actor="whatsapp_gateway",
+                    target_entity_type="whatsapp_channel",
+                    target_entity_id=masked_sender,
+                    decision=AuditDecision.DENY,
+                    policy_rule_id=reason,
+                    telemetry={"reason": reason, "chat_id": masked_chat},
+                )
+            except Exception as exc:
+                logger.error("Failed to write audit record for drop: %s", exc)
+
+    def _audit_event(
+        self,
+        event_name: str,
+        actor: str = "whatsapp_gateway",
+        telemetry: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self._audit_writer is not None:
+            try:
+                self._audit_writer.write(
+                    event_type=AuditEventType.AUTHZ_DECISION,
+                    actor=actor,
+                    target_entity_type="whatsapp_channel",
+                    target_entity_id="owner",
+                    decision=AuditDecision.ALLOW,
+                    policy_rule_id=event_name,
+                    telemetry=telemetry or {},
+                )
+            except Exception as exc:
+                logger.error("Failed to write audit event: %s", exc)
+
+    @property
+    def allowed_jids(self) -> List[str]:
+        """Authoritative whitelist of allowed WhatsApp JIDs.
+
+        Preference order:
+        1. whatsapp_contact_settings in the database (single source of truth for CLI mutations)
+        2. Fallback to static config.allowed_jids (initial seed or tests without DB contact settings)
+        """
+        if self._channel == "whatsapp" and hasattr(self._store, "_conn"):
+            try:
+                cur = self._store._conn.execute(
+                    "SELECT contact_jid FROM whatsapp_contact_settings ORDER BY contact_jid"
+                )
+                db_jids = [r[0] for r in cur.fetchall()]
+                if db_jids:
+                    return db_jids
+            except Exception:
+                pass
+        return getattr(self._config, "allowed_jids", [])
 
     @property
     def is_enabled(self) -> bool:
@@ -145,6 +247,7 @@ class ChannelGateway:
         is_valid, parsed, reject_reason = self._adapter.parse_update(raw_update)
         if not is_valid or parsed is None:
             logger.warning("Inbound update %r rejected: %s", raw_uid, reject_reason)
+            self._audit_drop(reject_reason or "validation_failed", "unknown", "unknown")
             return ProcessResult(
                 update_id=str(raw_uid or "unknown"),
                 channel_update_id=str(raw_uid or "unknown"),
@@ -158,15 +261,142 @@ class ChannelGateway:
         chat_id = parsed["chat_id"]
         text = parsed["text"]
 
-        # 2. Authentication: Sender and Chat allowlist check
+        # 2. Authentication and Canonical Identity Resolution
         if self._channel == "whatsapp":
-            allowed_jids = getattr(self._config, "allowed_jids", [])
-            sender_authorized = sender_id_str in allowed_jids
-            chat_authorized = chat_id in allowed_jids if allowed_jids else True
+            message_id = parsed.get("message_id", "")
+            # D5: Self-echo suppression
+            if self._echo_registry and self._echo_registry.is_echo(message_id):
+                logger.info("Dropping self-echo message id=%s", message_id)
+                self._audit_drop("self_echo_suppressed", sender_id_str, chat_id)
+                rec, _ = self._store.record_inbound_update(
+                    channel=self._channel,
+                    channel_update_id=channel_update_id,
+                    sender_id=sender_id_str,
+                    chat_id=chat_id,
+                    raw_text=None,
+                    state=UpdateLifecycleState.REJECTED,
+                    metadata={"rejection_reason": "self_echo_suppressed"},
+                )
+                return ProcessResult(
+                    update_id=rec.update_id,
+                    channel_update_id=channel_update_id,
+                    sender_id=sender_id_str,
+                    state=UpdateLifecycleState.REJECTED,
+                    error_summary="Self-echo message suppressed",
+                )
+
+            # D3/D4: from_me AND is_self_chat -> owner channel
+            if parsed.get("is_owner"):
+                configured_owner = getattr(self._config, "owner_jid", None)
+                if configured_owner:
+                    # Resolve identity of this self-chat event (after LID resolution)
+                    sender_pn = parsed.get("sender_pn")
+                    chat_jid = parsed.get("chat_jid", chat_id)
+                    canonical_owner: Optional[str] = None
+                    if sender_pn and CANONICAL_PN_REGEX.match(sender_pn):
+                        canonical_owner = sender_pn
+                    elif (chat_jid.endswith("@lid") or sender_id_str.endswith("@lid")) and self._alias_store:
+                        lid = chat_jid if chat_jid.endswith("@lid") else sender_id_str
+                        canonical_owner = self._alias_store.get_canonical_pn(lid)
+                    elif CANONICAL_PN_REGEX.match(sender_id_str):
+                        canonical_owner = sender_id_str
+
+                    if not canonical_owner or canonical_owner.strip().lower() != configured_owner.strip().lower():
+                        logger.warning(
+                            "Self-chat owner command rejected: sender=%s resolved=%s does not match configured owner_jid=%s. Owner commands disabled.",
+                            mask_phone_number(sender_id_str),
+                            mask_phone_number(canonical_owner or "unresolved"),
+                            mask_phone_number(configured_owner),
+                        )
+                        self._audit_drop("owner_identity_mismatch", sender_id_str, chat_id)
+                        rec, _ = self._store.record_inbound_update(
+                            channel=self._channel,
+                            channel_update_id=channel_update_id,
+                            sender_id=sender_id_str,
+                            chat_id=chat_id,
+                            raw_text=None,
+                            state=UpdateLifecycleState.REJECTED,
+                            metadata={"rejection_reason": "owner_identity_mismatch"},
+                        )
+                        return ProcessResult(
+                            update_id=rec.update_id,
+                            channel_update_id=channel_update_id,
+                            sender_id=sender_id_str,
+                            state=UpdateLifecycleState.REJECTED,
+                            error_summary="owner_identity_mismatch",
+                        )
+
+                if self._owner_channel_handler:
+                    self._owner_channel_handler.handle_owner_message(message_id, text)
+                self._audit_event(
+                    "owner_message_received",
+                    actor="owner",
+                    telemetry={"message_id": message_id, "text_length": len(text)},
+                )
+                rec, _ = self._store.record_inbound_update(
+                    channel=self._channel,
+                    channel_update_id=channel_update_id,
+                    sender_id=sender_id_str,
+                    chat_id=chat_id,
+                    raw_text=None,
+                    state=UpdateLifecycleState.COMPLETED,
+                    metadata={"owner_action": "processed"},
+                )
+                return ProcessResult(
+                    update_id=rec.update_id,
+                    channel_update_id=channel_update_id,
+                    sender_id=sender_id_str,
+                    state=UpdateLifecycleState.COMPLETED,
+                )
+
+            # D1: Canonical Identity Resolution
+            allowed_jids = self.allowed_jids
+            sender_pn = parsed.get("sender_pn")
+            chat_jid = parsed.get("chat_jid", chat_id)
+            canonical_pn: Optional[str] = None
+
+            if sender_pn and CANONICAL_PN_REGEX.match(sender_pn):
+                canonical_pn = sender_pn
+                if chat_jid.endswith("@lid") and self._alias_store:
+                    self._alias_store.learn_alias(chat_jid, canonical_pn, allowed_jids)
+            elif chat_jid.endswith("@lid") or sender_id_str.endswith("@lid"):
+                lid = chat_jid if chat_jid.endswith("@lid") else sender_id_str
+                if self._alias_store:
+                    canonical_pn = self._alias_store.get_canonical_pn(lid)
+            elif CANONICAL_PN_REGEX.match(sender_id_str):
+                canonical_pn = sender_id_str
+
+            if not canonical_pn:
+                # D1: Unresolved identity - drop before key derivation or memory writes
+                logger.warning(
+                    "Unresolved identity for chat_jid=%s, sender_id=%s", chat_jid, sender_id_str
+                )
+                self._audit_drop("unresolved_identity", sender_id_str, chat_id)
+                rec, _ = self._store.record_inbound_update(
+                    channel=self._channel,
+                    channel_update_id=channel_update_id,
+                    sender_id=sender_id_str,
+                    chat_id=chat_id,
+                    raw_text=None,
+                    state=UpdateLifecycleState.REJECTED,
+                    metadata={"rejection_reason": "unresolved_identity"},
+                )
+                return ProcessResult(
+                    update_id=rec.update_id,
+                    channel_update_id=channel_update_id,
+                    sender_id=sender_id_str,
+                    state=UpdateLifecycleState.REJECTED,
+                    error_summary="unresolved_identity",
+                )
+
+            # Whitelist check on canonical PN
+            sender_authorized = canonical_pn in allowed_jids
+            chat_authorized = True
+            sender_id_str = canonical_pn
             try:
-                numeric_sender_id = int(sender_id_str.split("@")[0])
-            except ValueError:
-                numeric_sender_id = abs(hash(sender_id_str)) % (10**9)
+                numeric_sender_id = int(canonical_pn.split("@")[0])
+            except (ValueError, IndexError):
+                numeric_sender_id = abs(hash(canonical_pn)) % (10**9)
         elif isinstance(self._config, TelegramConfig):
             try:
                 numeric_sender_id = int(sender_id_str)
@@ -197,6 +427,7 @@ class ChannelGateway:
                 chat_id,
                 reason,
             )
+            self._audit_drop(reason, sender_id_str, chat_id)
             # Record in store as REJECTED for security auditing (without raw text)
             rec, _ = self._store.record_inbound_update(
                 channel=self._channel,
@@ -205,7 +436,7 @@ class ChannelGateway:
                 chat_id=chat_id,
                 raw_text=None,  # Do not persist unauthorized text
                 state=UpdateLifecycleState.REJECTED,
-                metadata={"rejection_reason": reason},
+                metadata={"rejection_reason": reason, "masked_sender": mask_phone_number(sender_id_str)},
             )
             return ProcessResult(
                 update_id=rec.update_id,
@@ -270,23 +501,83 @@ class ChannelGateway:
         self._store.transition_update_state(rec.update_id, UpdateLifecycleState.QUEUED)
         self._store.transition_update_state(rec.update_id, UpdateLifecycleState.PROCESSING)
 
-        # 6. Contact-Scoped Memory Isolation Retrieval
-        # Strictly retrieve and decrypt only the authorized contact's records.
+        # 6. Contact-Scoped Memory Isolation Retrieval & Inbound Processing for WhatsApp
         contact_memories: List[Dict[str, Any]] = []
-        if self._channel == "whatsapp" and self._contact_memory_store is not None:
-            try:
-                contact_memories = self._contact_memory_store.list_contact_memories(
-                    contact_jid=sender_id_str, limit=5
-                )
-                logger.debug(
-                    "Retrieved %d isolated contact memories for %s",
-                    len(contact_memories),
-                    sender_id_str,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Contact memory retrieval failed for sender %s: %s", sender_id_str, exc
-                )
+        if self._channel == "whatsapp":
+            if self._contact_memory_store is not None:
+                try:
+                    self._contact_memory_store.store_memory(
+                        contact_jid=sender_id_str,
+                        record_type="inbound_message",
+                        content={
+                            "message_id": channel_update_id,
+                            "text": text,
+                            "sender_id": sender_id_str,
+                            "chat_id": chat_id,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to store contact memory for %s: %s", sender_id_str, exc)
+
+                try:
+                    contact_memories = self._contact_memory_store.list_contact_memories(
+                        contact_jid=sender_id_str, limit=5
+                    )
+                    logger.debug(
+                        "Retrieved %d isolated contact memories for %s",
+                        len(contact_memories),
+                        sender_id_str,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Contact memory retrieval failed for sender %s: %s", sender_id_str, exc
+                    )
+
+            # Section A: Contact Path Isolation
+            # Whitelisted contact messages MUST NEVER touch CommandRouter, central_brain, or ToolBroker.
+            if self._draft_manager is not None:
+                try:
+                    draft_res = self._draft_manager.create_draft_for_inbound(
+                        contact_jid=sender_id_str,
+                        inbound_message_id=channel_update_id,
+                        inbound_text=text,
+                        recent_messages=contact_memories,
+                    )
+                    card = draft_res.get("card") if draft_res else None
+
+                    # Deliver card to owner's self-chat via supervisor if available
+                    if card and self._supervisor is not None and hasattr(self._supervisor, "send_owner_notice"):
+                        try:
+                            self._supervisor.send_owner_notice(card)
+                        except Exception as exc:
+                            logger.error("Failed to send approval card to owner: %s", exc)
+
+                    # Mark inbound update as COMPLETED
+                    self._store.transition_update_state(
+                        rec.update_id,
+                        UpdateLifecycleState.COMPLETED,
+                    )
+                    return ProcessResult(
+                        update_id=rec.update_id,
+                        channel_update_id=channel_update_id,
+                        sender_id=sender_id_str,
+                        state=UpdateLifecycleState.COMPLETED,
+                        response_text=card,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to generate draft for inbound message %s: %s", rec.update_id, exc)
+                    self._store.transition_update_state(
+                        rec.update_id,
+                        UpdateLifecycleState.FAILED,
+                        error_summary=str(exc),
+                    )
+                    return ProcessResult(
+                        update_id=rec.update_id,
+                        channel_update_id=channel_update_id,
+                        sender_id=sender_id_str,
+                        state=UpdateLifecycleState.FAILED,
+                        error_summary=str(exc),
+                    )
 
         # 7. Route Command & Execute
         try:
