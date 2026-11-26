@@ -88,7 +88,7 @@ class WhatsAppAdapter:
                 stanza_id = key.get("id")
                 from_me = key.get("fromMe", False)
                 participant = key.get("participant")
-            is_self_chat = False
+            is_self_chat = bool(raw_event.get("is_self_chat", False))
             sender_pn = None
             alt_jid = None
             text = None

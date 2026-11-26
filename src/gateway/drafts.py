@@ -748,3 +748,26 @@ class DraftManager:
                     self._audit("draft_expired", target_id=eid.upper())
 
         return active
+
+    def expire_stale_drafts(self) -> int:
+        """Expire all pending drafts whose expires_at timestamp has passed.
+
+        Returns:
+            Number of newly expired drafts.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cur = self._conn.execute(
+            "SELECT draft_id FROM whatsapp_drafts WHERE status = 'pending' AND expires_at < ?",
+            (now_iso,),
+        )
+        expired_ids = [row[0] for row in cur.fetchall()]
+        if expired_ids:
+            with self._conn:
+                for eid in expired_ids:
+                    self._conn.execute(
+                        "UPDATE whatsapp_drafts SET status = 'expired', decided_at = ? WHERE UPPER(draft_id) = UPPER(?) AND status = 'pending'",
+                        (now_iso, eid),
+                    )
+                    self._audit("draft_expired", target_id=eid.upper())
+        return len(expired_ids)
+

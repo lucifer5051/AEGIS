@@ -87,6 +87,16 @@ def build_whatsapp_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="whatsapp_subcommand")
 
+    # run [--simulate] [--auth-dir PATH] [--scenario PATH] [--db-path PATH]
+    run_parser = subparsers.add_parser("run", help="Run the WhatsApp bridge supervisor or offline simulation.")
+    run_parser.add_argument("--simulate", action="store_true", help="Run offline scripted 5-turn demo scenario.")
+    run_parser.add_argument("--auth-dir", default=None, help="Directory for Baileys auth credentials.")
+    run_parser.add_argument("--scenario", default=None, help="Path to scenario JSON file for --simulate.")
+    run_parser.add_argument("--owner-jid", default=None, help="Owner phone number JID (<digits>@s.whatsapp.net).")
+
+    # status
+    subparsers.add_parser("status", help="Show WhatsApp gateway and bridge operational status.")
+
     contacts_parser = subparsers.add_parser("contacts", help="Manage whitelisted contacts.")
     contacts_sub = contacts_parser.add_subparsers(dest="contacts_action")
 
@@ -132,7 +142,7 @@ def handle_whatsapp_cli(argv: list[str]) -> int:
     parser = build_whatsapp_parser()
     args = parser.parse_args(argv)
 
-    if not args.whatsapp_subcommand or args.whatsapp_subcommand != "contacts" or not args.contacts_action:
+    if not args.whatsapp_subcommand:
         parser.print_help()
         return 0
 
@@ -146,6 +156,39 @@ def handle_whatsapp_cli(argv: list[str]) -> int:
 
     db_path = Path(args.db_path) if args.db_path else _get_runtime_db_path()
     migrations_dir = _get_migrations_dir()
+
+    if args.whatsapp_subcommand == "status":
+        from src.gateway.whatsapp_runtime import get_whatsapp_status, print_whatsapp_status
+        auth_dir = Path.home() / ".aegis" / "channels" / "whatsapp" / "session"
+        try:
+            conn = initialize_runtime_database(db_path, migrations_dir=migrations_dir)
+            status_data = get_whatsapp_status(conn, auth_dir=auth_dir)
+            print_whatsapp_status(status_data)
+            conn.close()
+            return 0
+        except Exception as exc:
+            print(f"[ERROR] Could not read WhatsApp status: {exc}", file=sys.stderr)
+            return 1
+
+    elif args.whatsapp_subcommand == "run":
+        from src.gateway.whatsapp_runtime import run_live_whatsapp, run_simulated_whatsapp
+        if args.simulate:
+            scenario_path = Path(args.scenario) if args.scenario else None
+            return run_simulated_whatsapp(scenario_path=scenario_path, db_path=db_path if args.db_path else None)
+        else:
+            auth_dir = Path(args.auth_dir) if args.auth_dir else (Path.home() / ".aegis" / "channels" / "whatsapp" / "session")
+            bridge_dir = Path(__file__).parent.parent / "bridge"
+            return run_live_whatsapp(
+                db_path=db_path,
+                auth_dir=auth_dir,
+                bridge_dir=bridge_dir,
+                migrations_dir=migrations_dir,
+                owner_jid=args.owner_jid,
+            )
+
+    if args.whatsapp_subcommand != "contacts" or not args.contacts_action:
+        parser.print_help()
+        return 0
     conn = initialize_runtime_database(db_path, migrations_dir=migrations_dir)
     key_store = ContactKeyStore(conn, WindowsDPAPIKeyProtector())
     draft_manager = DraftManager(conn, key_store)
