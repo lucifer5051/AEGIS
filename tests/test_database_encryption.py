@@ -395,9 +395,9 @@ def test_08_plaintext_to_encrypted_migration_preserves_all_data(temp_dir: Path):
     )
     assert u_cur.fetchone()["raw_text"] == update_text
 
-    # Verify all 9 migrations recorded in schema_migrations
+    # Verify all 11 migrations recorded in schema_migrations
     m_cur = enc_conn.execute("SELECT count(*) FROM schema_migrations;")
-    assert m_cur.fetchone()[0] == 9
+    assert m_cur.fetchone()[0] == 11
     enc_conn.close()
 
 
@@ -462,7 +462,7 @@ def test_10_initialize_runtime_database_transparent_migration(temp_dir: Path):
 
     # Verify migrations were applied to the newly encrypted database
     count = runtime_conn.execute("SELECT count(*) FROM schema_migrations;").fetchone()[0]
-    assert count == 9
+    assert count == 11
     runtime_conn.close()
 
 

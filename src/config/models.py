@@ -562,6 +562,10 @@ class TelegramConfig(AegisBaseConfig):
         return self
 
 
+_CANONICAL_PN_REGEX = re.compile(r"^\d{7,15}@s\.whatsapp\.net$")
+MAX_WHATSAPP_CONTACTS: int = 12
+
+
 class WhatsAppConfig(AegisBaseConfig):
     """WhatsApp secure remote-control gateway configuration.
 
@@ -578,6 +582,10 @@ class WhatsAppConfig(AegisBaseConfig):
             "Explicit allowlist of WhatsApp JIDs or normalized E.164 phone numbers "
             "permitted to interact with SAGE. Must be non-empty when gateway is enabled."
         ),
+    )
+    owner_jid: Optional[str] = Field(
+        default=None,
+        description="Canonical phone-number JID of the owner (<digits>@s.whatsapp.net).",
     )
     session_path: str = Field(
         default="%USERPROFILE%\\.aegis\\channels\\whatsapp\\session",
@@ -607,6 +615,17 @@ class WhatsAppConfig(AegisBaseConfig):
     @model_validator(mode="after")
     def validate_whatsapp_gateway_config(self) -> "WhatsAppConfig":
         """Validate that if WhatsApp gateway is enabled, required settings are present."""
+        if len(self.allowed_jids) > MAX_WHATSAPP_CONTACTS:
+            raise ValueError(
+                f"WhatsApp allowed_jids exceeds maximum limit of {MAX_WHATSAPP_CONTACTS} contacts "
+                f"(got {len(self.allowed_jids)})."
+            )
+        if self.owner_jid:
+            clean_owner = self.owner_jid.strip().lower()
+            if not _CANONICAL_PN_REGEX.match(clean_owner):
+                raise ValueError(
+                    f"Invalid owner_jid '{clean_owner}'. Must match canonical format: <digits>@s.whatsapp.net"
+                )
         if self.enabled:
             if not self.allowed_jids:
                 raise ValueError(
