@@ -4582,3 +4582,52 @@ Transform SAGE into an intelligent, multi-agent desktop workstation with dynamic
 - `tests/test_prompt081_intelligence_and_voice.py`: **58 passed, 4 skipped, 0 failed** (Model catalogue, LFM3-Omni-2B evaluation, hardware compatibility, Central Brain model parsing, VoiceService device enumeration and PTT states, skills candidate pools and persistence, ModelsView filter logic, SettingsView Voice tab and syntax).
 - Full test suite: **1,148 passed, 3 skipped, 0 failed** (1,151 total collected, 100% offline).
 
+---
+
+# MILESTONE 082: WHATSAPP AGENT LOCAL DRAFTING, INJECTION DEFENSE & BANTER STYLE
+
+**Date:** 2026-11-26
+
+## 1. Summary of Completed Phases (Prompt 6)
+
+### Phase 1: Verification Matrix & Security Hardening
+- **Coverage Matrix Verified**: All 30 tests in `tests/test_whatsapp_draft_approval.py` passing:
+  - Command parsing variants (malformed, casing, spacing, injection attempts).
+  - Non-owner & echo message deduplication.
+  - Contact messages strictly isolated from CommandRouter, central_brain, and ToolBroker.
+  - Atomicity rowcount guards on draft status transitions (`pending -> approved -> sending -> sent|failed`, `rejected`, `expired`, `superseded`, `cancelled`).
+  - Cryptographic Associated Authenticated Data (AAD) bound to `aegis:whatsapp_draft:v1:{contact_jid}:{draft_id}`.
+  - Single source of truth for allowed JIDs in `whatsapp_contact_settings` with synchronized bridge allowlist regeneration.
+  - Fail-closed owner JID cross-check against `configured_owner`.
+- **Checkpoint 1 Pushed**: Commits `a0da586`, `4680c40`, `9cec80f`, and `1bc09fe` pushed to `origin/main`.
+
+### Phase 2: LocalDraftProvider, Context Isolation & Injection Resistance
+- **Local Model Isolation**: `LocalDraftProvider` (`src/gateway/local_draft_provider.py`) strictly enforces `SecurityPolicy(network=LOCAL_ONLY, allow_fallback=False)` with zero tool definitions and no remote model fallback.
+- **Contact-Scoped Context Builder**: Fetches up to 12 recent messages decrypted solely with the contact's isolated DEK, respecting a 4000-character budget and eliminating cross-contact leakage.
+- **Spotlighting & Delimiter Gating**: Untrusted inputs delineated with fresh random nonces (`<contact_messages nonce="...">`); closing tags, ChatML tokens (`<|im_end|>`), and instruction tags (`[INST]`) are neutralized.
+- **Output Validation & Sanitization**: Strips assistant role prefixes, enforces 600-character limit, rejects markdown headings and code fences, enforces `_check_no_secrets`, and rejects newly introduced URLs/emails/phone numbers.
+- **Heuristic Injection Warning**: Scans English, Hindi, and Marathi transliterated prompt injection patterns. Corpus with 20 attack samples stored in `tests/data/whatsapp_injection_corpus.json`. Injections trigger prominent card warning flag: `⚠️ WARNING: Possible prompt injection detected in contact message!`.
+- **Owner Context Storage (2.7)**: Outbound owner messages to contacts (`from_me=True, is_self_chat=False`) stored in contact's encrypted memory with `owner_message_stored` audit event.
+- **Burst Debouncing (2.8)**: `BurstDebouncer` queues rapid messages (max capacity 20) and debounces into single unified draft context.
+
+### Phase 3: Banter Style Mode with Server-Side Guardrails
+- **Banter Prompt Construction**: Prompts instruct local model in friendly teasing, dry humor, and at most one contextual jab, capped at two short sentences.
+- **Protected Topics Demotion**: Automatic server-side detection of medical/health, financial hardship, family tragedy, politics, and religion; immediately demotes banter mode to normal mode.
+- **Multilingual Banned Terms Filter**: Profanity/slurs filter across English, Hindi, and Marathi in `config/whatsapp_banned_terms.txt`; drafts containing banned terms are caught and regenerated in normal mode.
+- **Card Formatting**: Banter drafts clearly badged with `[BANTER]` in the approval card.
+
+## 2. Invariants Preserved
+- **TrustCore Authorization**: Fully authoritative and unbypassable.
+- **Zero Remote Fallback**: Draft generation runs 100% offline via local model only.
+- **Zero Plaintext Leakage**: All stored drafts and memory records encrypted at rest using isolated per-contact DEKs.
+- **Offline Test Suite**: 100% offline, zero network dependencies.
+
+## 3. Test Verification
+- `tests/test_whatsapp_draft_approval.py`: **30 passed**
+- `tests/test_whatsapp_local_draft.py`: **15 passed**
+- `tests/test_whatsapp_banter.py`: **20 passed**
+- `tests/test_whatsapp_bridge_wiring.py`: **15 passed**
+- Bridge test suite (`bridge/`): **32 passed, 0 failed**
+- Full test suite: **1,226 passed, 5 skipped, 0 failed** (1,231 total collected, 100% offline)
+
+
