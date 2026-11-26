@@ -72,12 +72,12 @@ def is_loopback_host(url_or_host: str) -> bool:
         return False
     try:
         cleaned = url_or_host.strip()
-        if "://" in cleaned:
-            parsed = urlparse(cleaned)
-            hostname = parsed.hostname or ""
-        else:
-            hostname = cleaned.split(":")[0]
-        hostname = hostname.strip("[]").lower()
+        if cleaned.strip("[]").lower() in ("127.0.0.1", "localhost", "::1"):
+            return True
+        if "://" not in cleaned:
+            cleaned = f"http://{cleaned}"
+        parsed = urlparse(cleaned)
+        hostname = (parsed.hostname or "").strip("[]").lower()
         return hostname in ("127.0.0.1", "localhost", "::1")
     except Exception:
         return False

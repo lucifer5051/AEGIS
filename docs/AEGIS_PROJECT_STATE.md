@@ -4674,10 +4674,22 @@ Transform SAGE into an intelligent, multi-agent desktop workstation with dynamic
 - **Phase 2 Tests**: 14 tests in `tests/test_whatsapp_runtime.py` covering all preflight failure modes, status reporting, full simulation, clean shutdown, crash backoff, and local model refusal.
 - **Phase 2 Committed**: Commit `ad028d2`.
 
-### Phase 3: Repository Hygiene & Architecture Documentation
-- **Cleaned Up `resrch papers/`**: Removed 47 binary PDF files from git index (`git rm -r --cached "resrch papers"`). Preserved `.gitignore` rule.
-- **Curated Related Work (`docs/RELATED_WORK.md`)**: Full structured catalog of all 47 research papers grouped by topic (Prompt Injection Defense, Multi-Agent Coordination, Reasoning & Verification, Agent Memory).
-- **Comprehensive Documentation (`docs/WHATSAPP_AGENT.md`)**: Architectural diagrams, threat model, approval state machine, banter style guide, CLI reference, and prompt-driven autonomous provenance note. Linked in `README.md`.
+### Phase 4: Model Gateway Wiring, Ollama Thinking Models & Loopback Integration (Prompt 10)
+- **Model Gateway Wiring Bug Fix**:
+  - Identified root-cause bug where `run_smoke_test` passed `conn` (`CoordinatedSQLCipherConnection`) as positional argument to `ModelGateway(conn)`, causing `self.registry = conn` and `AttributeError: 'CoordinatedSQLCipherConnection' object has no attribute 'get_provider_health'`.
+  - Resolved by implementing `build_local_model_gateway` in `src/gateway/whatsapp_runtime.py`, properly initializing `ModelRegistry` and `ModelRouter` backed by `OllamaProviderAdapter`.
+- **Ollama Thinking Model Support & Adapter Improvements**:
+  - `OllamaProviderAdapter` enhanced to support native Ollama `/api/chat` with `"think": False`, `"keep_alive": "10m"`, and options when requested in `metadata` (`use_chat=True`), while preserving `/api/generate` behavior for legacy callers.
+  - `strip_thinking_tags` implemented in `src/gateway/local_draft_provider.py` to defensively clean `<think>...</think>` and unterminated thinking blocks while preserving non-think brackets (e.g. `I <3 you`).
+  - Generation options configured: `temperature` (0.7 normal / 0.9 banter), `num_predict 160`, `num_ctx 4096`, `keep_alive "10m"`, request timeout 60s, preflight/first smoke call 30s timeout.
+  - Prompt budget guard: estimates tokens (`chars // 3`); drops oldest history messages if prompt exceeds 75% of `num_ctx`.
+- **CLI & Smoke Test Enhancements**:
+  - Added `--model` and `--ollama-host` parameters to `whatsapp run` and `whatsapp smoke-test`.
+  - Loopback host restriction: strictly enforces loopback destinations (`127.0.0.1`, `localhost`, `::1`).
+  - Smoke test exports detailed execution run to `smoke_results/<timestamp>_<model>.json` with per-case latency and failure reason breakdown. `smoke_results/` ignored by git.
+- **Loopback Integration Test Suite (`tests/test_whatsapp_ollama_integration.py`)**:
+  - 10 automated integration tests using a real stdlib `http.server` loopback stub on `127.0.0.1` testing end-to-end gateway reachability, error handling (500, timeout, down daemon, malformed JSON), thinking tag stripping, budget pruning, and bug catch verification.
+
 
 ## 2. Invariants Preserved
 - **Authoritative TrustCore**: Zero unapproved outbound dispatches; 0 unsanctioned sends.
