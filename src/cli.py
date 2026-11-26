@@ -87,20 +87,24 @@ def build_whatsapp_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="whatsapp_subcommand")
 
-    # run [--simulate] [--auth-dir PATH] [--scenario PATH] [--db-path PATH]
+    # run [--simulate] [--auth-dir PATH] [--scenario PATH] [--db-path PATH] [--model NAME] [--ollama-host URL]
     run_parser = subparsers.add_parser("run", help="Run the WhatsApp bridge supervisor or offline simulation.")
     run_parser.add_argument("--simulate", action="store_true", help="Run offline scripted 5-turn demo scenario.")
     run_parser.add_argument("--auth-dir", default=None, help="Directory for Baileys auth credentials.")
     run_parser.add_argument("--scenario", default=None, help="Path to scenario JSON file for --simulate.")
     run_parser.add_argument("--owner-jid", default=None, help="Owner phone number JID (<digits>@s.whatsapp.net).")
+    run_parser.add_argument("--model", default=None, help="Local model name (default: qwen3.5:4b).")
+    run_parser.add_argument("--ollama-host", default="http://127.0.0.1:11434", help="Local Ollama daemon URL (default: http://127.0.0.1:11434).")
 
     # status
     subparsers.add_parser("status", help="Show WhatsApp gateway and bridge operational status.")
 
-    # smoke-test [--fake] [--model-alias ALIAS]
+    # smoke-test [--fake] [--model NAME] [--ollama-host URL]
     smoke_parser = subparsers.add_parser("smoke-test", help="Run synthetic smoke test on drafting pipeline.")
     smoke_parser.add_argument("--fake", action="store_true", help="Use scripted fake model for offline/CI testing.")
-    smoke_parser.add_argument("--model-alias", default="local", help="Model alias to test (default: local).")
+    smoke_parser.add_argument("--model", default=None, help="Local model name (default: qwen3.5:4b).")
+    smoke_parser.add_argument("--model-alias", default=None, help="Model alias to test (legacy alias for --model).")
+    smoke_parser.add_argument("--ollama-host", default="http://127.0.0.1:11434", help="Local Ollama daemon URL (default: http://127.0.0.1:11434).")
 
     contacts_parser = subparsers.add_parser("contacts", help="Manage whitelisted contacts.")
     contacts_sub = contacts_parser.add_subparsers(dest="contacts_action")
@@ -189,11 +193,18 @@ def handle_whatsapp_cli(argv: list[str]) -> int:
                 bridge_dir=bridge_dir,
                 migrations_dir=migrations_dir,
                 owner_jid=args.owner_jid,
+                model_alias=args.model,
+                ollama_host=args.ollama_host,
             )
 
     elif args.whatsapp_subcommand == "smoke-test":
         from src.gateway.whatsapp_runtime import run_smoke_test
-        return run_smoke_test(use_fake=args.fake, model_alias=args.model_alias)
+        model_name = args.model or args.model_alias or "qwen3.5:4b"
+        return run_smoke_test(
+            use_fake=args.fake,
+            model_alias=model_name,
+            ollama_host=args.ollama_host,
+        )
 
     if args.whatsapp_subcommand != "contacts" or not args.contacts_action:
         parser.print_help()

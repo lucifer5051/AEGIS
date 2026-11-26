@@ -24,6 +24,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from src.config.models import MAX_WHATSAPP_CONTACTS, WhatsAppConfig
 from src.gateway.baileys_sidecar import BaileysSidecarSupervisor
@@ -62,6 +63,58 @@ def mask_jid(jid: str) -> str:
     return f"...{pn[-4:]}{domain}"
 
 
+def is_loopback_host(url_or_host: str) -> bool:
+    """Validate that the given host/URL points strictly to a local loopback address.
+
+    Allowed hostnames: 127.0.0.1, localhost, ::1.
+    """
+    if not url_or_host or not isinstance(url_or_host, str):
+        return False
+    try:
+        cleaned = url_or_host.strip()
+        if "://" in cleaned:
+            parsed = urlparse(cleaned)
+            hostname = parsed.hostname or ""
+        else:
+            hostname = cleaned.split(":")[0]
+        hostname = hostname.strip("[]").lower()
+        return hostname in ("127.0.0.1", "localhost", "::1")
+    except Exception:
+        return False
+
+
+def build_local_model_gateway(
+    model_name: str = "qwen3.5:4b",
+    ollama_host: str = "http://127.0.0.1:11434",
+    timeout_seconds: float = 60.0,
+) -> Any:
+    """Construct a real local ModelGateway backed by OllamaProviderAdapter with loopback enforcement."""
+    if not is_loopback_host(ollama_host):
+        raise ValueError(
+            f"Refusing non-loopback host '{ollama_host}'. WhatsApp text cannot leave the machine. "
+            "Only 127.0.0.1, localhost, or ::1 are allowed."
+        )
+
+    from src.models.adapters.ollama import OllamaProviderAdapter
+    from src.models.gateway import ModelGateway
+    from src.models.registry import ModelRegistry
+    from src.models.router import ModelRouter
+
+    adapter = OllamaProviderAdapter(
+        base_url=ollama_host,
+        default_model=model_name,
+        timeout_seconds=timeout_seconds,
+    )
+    registry = ModelRegistry()
+    registry.register_provider(adapter)
+    registry.set_alias("local", model_name)
+    registry.set_alias("fast", model_name)
+    registry.set_alias("balanced", model_name)
+    registry.set_alias(model_name, model_name)
+    router = ModelRouter(registry=registry)
+    return ModelGateway(registry=registry, router=router)
+
+
 # ==============================================================================
 # 2.2 PREFLIGHT CHECKS
 # ==============================================================================
@@ -78,6 +131,7 @@ def run_preflight(
     custom_llm: Optional[Callable[[str, str], str]] = None,
     db_conn: Optional[Any] = None,
     simulate_mode: bool = False,
+    model_ping_timeout: float = 5.0,
 ) -> Tuple[bool, Optional[str]]:
     """Execute the required preflight safety checks.
 
@@ -315,9 +369,13 @@ def run_preflight(
                 f"Preflight Check 6 Failed: Error checking local model availability: {exc}.",
             )
 
-        # LIVE mode only: call existing ModelGateway health facility with 5s timeout
+        # LIVE mode only: call existing ModelGateway health facility with 30s timeout
         if not simulate_mode:
             prov_id = desc.provider_id if desc else alias
+            if hasattr(model_gateway, "registry") and model_gateway.registry:
+                if hasattr(model_gateway.registry, "_providers"):
+                    if prov_id not in model_gateway.registry._providers and "ollama" in model_gateway.registry._providers:
+                        prov_id = "ollama"
             try:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     def _ping_health():
@@ -327,7 +385,7 @@ def run_preflight(
                             return model_gateway.registry.get_provider_health(prov_id)
                         return ProviderHealthStatus.HEALTHY
                     fut = executor.submit(_ping_health)
-                    health_res = fut.result(timeout=5.0)
+                    health_res = fut.result(timeout=model_ping_timeout)
 
                 # Check health status
                 if hasattr(health_res, "status"):
@@ -340,7 +398,7 @@ def run_preflight(
             except concurrent.futures.TimeoutError:
                 return (
                     False,
-                    f"Preflight Check 6 Failed: Local model provider '{prov_id}' ping timed out after 5.0 seconds.",
+                    f"Preflight Check 6 Failed: Local model provider '{prov_id}' ping timed out after {model_ping_timeout:.1f} seconds.",
                 )
             except Exception as exc:
                 return (
@@ -766,11 +824,21 @@ def run_live_whatsapp(
     owner_jid: Optional[str] = None,
     model_gateway: Optional[Any] = None,
     model_alias: Optional[str] = None,
+    ollama_host: Optional[str] = None,
     custom_llm: Optional[Callable[[str, str], str]] = None,
     stop_event: Optional[threading.Event] = None,
     max_consecutive_failures: int = 5,
 ) -> int:
     """Execute live WhatsApp supervisor loop with preflight checks and crash backoff."""
+    model_name = model_alias or "qwen3.5:4b"
+    host = ollama_host or "http://127.0.0.1:11434"
+
+    if model_gateway is None and custom_llm is None:
+        if not is_loopback_host(host):
+            print(f"\n[PREFLIGHT ERROR] Refusing non-loopback host '{host}'. Only 127.0.0.1, localhost, ::1 are allowed.\n", file=sys.stderr)
+            return 1
+        model_gateway = build_local_model_gateway(model_name=model_name, ollama_host=host)
+
     # Run Preflight Checks
     passed, err = run_preflight(
         db_path=db_path,
@@ -779,8 +847,9 @@ def run_live_whatsapp(
         auth_dir=auth_dir,
         owner_jid=owner_jid,
         model_gateway=model_gateway,
-        model_alias=model_alias,
+        model_alias=model_name,
         custom_llm=custom_llm,
+        model_ping_timeout=30.0,
     )
     if not passed:
         print(f"\n[PREFLIGHT ERROR] {err}\n", file=sys.stderr)
@@ -979,7 +1048,12 @@ def run_live_whatsapp(
 # ==============================================================================
 
 
-def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
+def run_smoke_test(
+    use_fake: bool = False,
+    model_alias: Optional[str] = None,
+    ollama_host: Optional[str] = None,
+    custom_model_gateway: Optional[Any] = None,
+) -> int:
     """Execute synthetic 12-case smoke test on drafting pipeline without touching production DB."""
     import tempfile
     import time
@@ -990,8 +1064,17 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
     from src.gateway.local_draft_provider import LocalDraftProvider, is_urgent_message
     from src.gateway.drafts import DraftContext
 
+    target_model = model_alias or "qwen3.5:4b"
+    host = ollama_host or "http://127.0.0.1:11434"
+
+    if not is_loopback_host(host):
+        print(f"[FAIL] Ollama host '{host}' is not a permitted loopback address (127.0.0.1, localhost, ::1).")
+        return 1
+
+    mode_str = "FAKE" if use_fake else f"REAL ({target_model})"
     print("================================================================================")
-    print(f"SAGE WhatsApp Drafting Pipeline Smoke Test (mode: {'FAKE' if use_fake else f'REAL ({model_alias})'})")
+    print(f"SAGE WhatsApp Drafting Pipeline Smoke Test (mode: {mode_str})")
+    print(f"Target Model: {target_model} | Ollama Host: {host}")
     print("================================================================================")
 
     conn = None
@@ -1016,19 +1099,38 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
                 (banter_jid, "Bob", "banter", now_iso),
             )
 
-        model_gateway = ModelGateway(conn)
+        if not use_fake:
+            if custom_model_gateway is not None:
+                model_gateway = custom_model_gateway
+            else:
+                model_gateway = build_local_model_gateway(
+                    model_name=target_model,
+                    ollama_host=host,
+                    timeout_seconds=30.0,
+                )
+        else:
+            model_gateway = None
 
         if not use_fake:
             try:
+                provider_id = "ollama"
+                if model_gateway and hasattr(model_gateway, "registry"):
+                    if target_model in model_gateway.registry._providers:
+                        provider_id = target_model
+                    else:
+                        model_desc = model_gateway.registry.get_model(target_model)
+                        if model_desc:
+                            provider_id = model_desc.provider_id
+
                 with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(model_gateway.get_provider_health, model_alias)
-                    health = future.result(timeout=5.0)
+                    future = executor.submit(model_gateway.get_provider_health, provider_id)
+                    health = future.result(timeout=30.0)
                 from src.models.domain import ProviderHealthStatus
                 if health.status == ProviderHealthStatus.UNAVAILABLE:
-                    print(f"[FAIL] Local model provider '{model_alias}' is unreachable: {health.error_message}")
+                    print(f"[FAIL] Local model provider '{provider_id}' is unreachable: {health.error_message}")
                     return 1
             except FuturesTimeoutError:
-                print(f"[FAIL] Local model provider '{model_alias}' timed out after 5.0 seconds.")
+                print(f"[FAIL] Local model provider check timed out after 30.0 seconds.")
                 return 1
             except Exception as exc:
                 print(f"[FAIL] Local model provider check failed: {exc}")
@@ -1066,7 +1168,7 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
         provider = LocalDraftProvider(
             model_gateway=model_gateway if not use_fake else None,
             memory_store=memory_store,
-            model_alias=model_alias,
+            model_alias=target_model,
             custom_llm_fn=custom_llm,
         )
 
@@ -1206,6 +1308,7 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
         ]
 
         results = []
+        failure_reasons: Dict[str, int] = {}
         total_latency_ms = 0.0
 
         for c in cases:
@@ -1217,6 +1320,10 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
                 lat_ms = (time.perf_counter() - t0) * 1000.0
                 total_latency_ms += lat_ms
                 is_pass = (urgent_detected == c["expected_urgent"])
+                reason_code = None
+                if not is_pass:
+                    reason_code = "URGENT_DETECTION_MISMATCH"
+                    failure_reasons[reason_code] = failure_reasons.get(reason_code, 0) + 1
                 res_entry = {
                     "id": c["id"],
                     "input": c["input"],
@@ -1227,6 +1334,7 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
                     "urgent_flag": True,
                     "output": "urgent_message_no_draft",
                     "result": "PASS" if is_pass else "FAIL",
+                    "failure_reason": reason_code,
                     "latency_ms": lat_ms,
                 }
                 results.append(res_entry)
@@ -1249,6 +1357,22 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
                         and draft_res.banter_suppressed == c["expected_banter_suppressed"]
                         and draft_res.effective_mode == c["expected_effective_mode"]
                     )
+                    reason_code = None
+                    if not is_pass:
+                        if draft_res.text is None:
+                            reason_code = "EMPTY_DRAFT"
+                        elif len(draft_res.text) > 600:
+                            reason_code = "DRAFT_TOO_LONG"
+                        elif draft_res.injection_flag != c["expected_inj"]:
+                            reason_code = "INJECTION_FLAG_MISMATCH"
+                        elif draft_res.banter_suppressed != c["expected_banter_suppressed"]:
+                            reason_code = "BANTER_SUPPRESSION_MISMATCH"
+                        elif draft_res.effective_mode != c["expected_effective_mode"]:
+                            reason_code = "EFFECTIVE_MODE_MISMATCH"
+                        else:
+                            reason_code = "UNKNOWN_VALIDATION_FAILURE"
+                        failure_reasons[reason_code] = failure_reasons.get(reason_code, 0) + 1
+
                     res_entry = {
                         "id": c["id"],
                         "input": c["input"],
@@ -1259,12 +1383,22 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
                         "urgent_flag": False,
                         "output": draft_res.text,
                         "result": "PASS" if is_pass else "FAIL",
+                        "failure_reason": reason_code,
                         "latency_ms": lat_ms,
                     }
                     results.append(res_entry)
                 except Exception as exc:
                     lat_ms = (time.perf_counter() - t0) * 1000.0
                     total_latency_ms += lat_ms
+                    exc_msg = str(exc)
+                    if "Draft output validation failed after retry:" in exc_msg:
+                        reason_code = f"VALIDATION_RETRY_FAILED: {exc_msg.split('Draft output validation failed after retry:', 1)[1].strip()}"
+                    elif "timeout" in exc_msg.lower():
+                        reason_code = "MODEL_REQUEST_TIMEOUT"
+                    else:
+                        reason_code = f"EXCEPTION: {type(exc).__name__}"
+                    failure_reasons[reason_code] = failure_reasons.get(reason_code, 0) + 1
+
                     res_entry = {
                         "id": c["id"],
                         "input": c["input"],
@@ -1275,6 +1409,7 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
                         "urgent_flag": False,
                         "output": f"ERROR: {exc}",
                         "result": "FAIL",
+                        "failure_reason": reason_code,
                         "latency_ms": lat_ms,
                     }
                     results.append(res_entry)
@@ -1300,7 +1435,40 @@ def run_smoke_test(use_fake: bool = False, model_alias: str = "local") -> int:
 
         print("--------------------------------------------------------------------------------")
         print(f"Summary: Total: {len(results)}, Passed: {passed_count}, Failed: {failed_count}, Avg Latency: {avg_latency:.1f}ms")
+        if failure_reasons:
+            print("Validation Failure Reason Breakdown:")
+            for reason, cnt in sorted(failure_reasons.items(), key=lambda x: -x[1]):
+                print(f"  - {reason}: {cnt}")
         print("--------------------------------------------------------------------------------")
+
+        # Write results to smoke_results/<UTC timestamp>_<model>.json
+        try:
+            results_dir = Path("smoke_results")
+            results_dir.mkdir(parents=True, exist_ok=True)
+            safe_model = re.sub(r"[^\w\-.]", "_", target_model)
+            timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            json_filename = f"{timestamp_str}_{safe_model}.json"
+            json_path = results_dir / json_filename
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "model": target_model,
+                        "host": host,
+                        "mode": "fake" if use_fake else "real",
+                        "total": len(results),
+                        "passed": passed_count,
+                        "failed": failed_count,
+                        "avg_latency_ms": avg_latency,
+                        "failure_reasons": failure_reasons,
+                        "cases": results,
+                    },
+                    f,
+                    indent=2,
+                )
+            print(f"Detailed smoke test results saved to: {json_path}")
+        except Exception as save_err:
+            print(f"Warning: Failed to save smoke results JSON: {save_err}")
 
         if failed_count > 0:
             return 1

@@ -53,9 +53,15 @@ class OllamaProviderAdapter(BaseModelProvider):
         self.default_model = default_model
         self._http_client = http_client
 
-    def _request(self, endpoint: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _request(
+        self,
+        endpoint: str,
+        payload: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        req_timeout = timeout if timeout is not None else self.timeout_seconds
         if self._http_client:
-            return self._http_client(endpoint, payload, self.timeout_seconds)
+            return self._http_client(endpoint, payload, req_timeout)
 
         url = f"{self.base_url}{endpoint}"
         data = json.dumps(payload).encode("utf-8") if payload else None
@@ -66,7 +72,7 @@ class OllamaProviderAdapter(BaseModelProvider):
             method="POST" if data else "GET",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
+            with urllib.request.urlopen(req, timeout=req_timeout) as resp:
                 body = resp.read().decode("utf-8")
                 return json.loads(body)
         except urllib.error.URLError as exc:
@@ -76,7 +82,7 @@ class OllamaProviderAdapter(BaseModelProvider):
             ) from exc
         except TimeoutError as exc:
             raise ModelTimeoutError(
-                f"Ollama request timed out after {self.timeout_seconds}s",
+                f"Ollama request timed out after {req_timeout}s",
                 provider_id=self.provider_id,
             ) from exc
 
@@ -128,6 +134,57 @@ class OllamaProviderAdapter(BaseModelProvider):
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         model = request.model_id or self.default_model
+        timeout = request.metadata.get("timeout_seconds") if request.metadata else None
+
+        # Check if chat endpoint with thinking disabled is requested
+        if request.metadata and (request.metadata.get("use_chat") or "think" in request.metadata):
+            messages = []
+            if request.system_prompt:
+                messages.append({"role": "system", "content": request.system_prompt})
+            messages.append({"role": "user", "content": request.prompt})
+
+            chat_payload: Dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "options": {
+                    "temperature": request.temperature,
+                    "top_p": request.top_p,
+                    "num_predict": request.max_tokens,
+                    "stop": request.stop_sequences,
+                },
+            }
+            if "think" in request.metadata:
+                chat_payload["think"] = request.metadata["think"]
+            if "keep_alive" in request.metadata:
+                chat_payload["keep_alive"] = request.metadata["keep_alive"]
+            if "options" in request.metadata:
+                chat_payload["options"].update(request.metadata["options"])
+            if request.response_format and request.response_format.get("type") == "json_object":
+                chat_payload["format"] = "json"
+
+            start = time.perf_counter()
+            data = self._request("/api/chat", chat_payload, timeout=timeout)
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+            content = data.get("message", {}).get("content", "")
+            prompt_tokens = data.get("prompt_eval_count", 0)
+            eval_tokens = data.get("eval_count", 0)
+
+            return ModelResponse(
+                content=content,
+                model_id=model,
+                provider_id=self.provider_id,
+                request_id=request.request_id,
+                finish_reason="stop" if data.get("done") else "length",
+                usage=ModelUsage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=eval_tokens,
+                    total_tokens=prompt_tokens + eval_tokens,
+                ),
+                execution_duration_ms=elapsed_ms,
+            )
+
         payload = {
             "model": model,
             "prompt": request.prompt,
@@ -144,7 +201,7 @@ class OllamaProviderAdapter(BaseModelProvider):
             payload["format"] = "json"
 
         start = time.perf_counter()
-        data = self._request("/api/generate", payload)
+        data = self._request("/api/generate", payload, timeout=timeout)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
 
         content = data.get("response", "")

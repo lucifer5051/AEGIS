@@ -533,6 +533,18 @@ class BurstDebouncer:
             }
 
 
+def strip_thinking_tags(text: str) -> str:
+    """Defensively strip <think>...</think> blocks and unterminated <think> to end of text.
+
+    Nested angle brackets that are not think tags (e.g. 'I <3 you' or 'x < 5') are preserved.
+    """
+    if not text or "<think" not in text.lower():
+        return text
+    cleaned = re.sub(r"(?is)<\s*think\s*>.*?<\s*/\s*think\s*>", "", text)
+    cleaned = re.sub(r"(?is)<\s*think\s*>.*$", "", cleaned)
+    return cleaned.strip()
+
+
 class LocalDraftProvider:
     """Production local-model draft provider with injection defense and output validation."""
 
@@ -546,6 +558,11 @@ class LocalDraftProvider:
         custom_llm_fn: Optional[Callable[[str, str], str]] = None,
         banned_terms_path: Optional[str] = None,
         protected_topics_path: Optional[str] = None,
+        num_predict: int = 160,
+        num_ctx: int = 4096,
+        keep_alive: str = "10m",
+        timeout_seconds: float = 60.0,
+        initial_timeout_seconds: float = 30.0,
     ) -> None:
         self._gateway = model_gateway
         self._memory_store = memory_store
@@ -555,9 +572,15 @@ class LocalDraftProvider:
         self._custom_llm = custom_llm_fn
         self._banned_terms = load_banned_terms(banned_terms_path)
         self._protected_topics = load_protected_topics(protected_topics_path)
+        self._num_predict = num_predict
+        self._num_ctx = num_ctx
+        self._keep_alive = keep_alive
+        self._timeout_seconds = timeout_seconds
+        self._initial_timeout_seconds = initial_timeout_seconds
+        self._is_first_call = True
 
     def build_context(self, ctx: DraftContext) -> Tuple[str, Set[str]]:
-        """Assemble contact-scoped conversation history within character budget.
+        """Assemble contact-scoped conversation history within character and token budgets.
 
         Returns:
             Tuple of (formatted_history_text, set_of_allowed_entities).
@@ -601,6 +624,16 @@ class LocalDraftProvider:
                 break
             history_msgs.pop(0)
 
+        # Prompt budget guard: estimate tokens (chars // 3). If prompt exceeds 75% of num_ctx,
+        # drop oldest history messages until it fits.
+        max_prompt_tokens = int(0.75 * self._num_ctx)
+        while history_msgs:
+            test_history = "\n".join(f"{m['role']}: {m['text']}" for m in history_msgs)
+            est_total_chars = len(test_history) + len(ctx.inbound_text) + 800
+            if (est_total_chars // 3) <= max_prompt_tokens:
+                break
+            history_msgs.pop(0)
+
         # 5. Format history lines
         formatted_lines = []
         for msg in history_msgs:
@@ -609,7 +642,7 @@ class LocalDraftProvider:
 
         return "\n".join(formatted_lines), allowed_entities
 
-    def _call_model(self, prompt: str, system_prompt: str) -> str:
+    def _call_model(self, prompt: str, system_prompt: str, style_mode: str = "normal") -> str:
         """Call the local LLM model ensuring local-only network boundary and zero tools."""
         if self._custom_llm is not None:
             return self._custom_llm(prompt, system_prompt)
@@ -621,13 +654,28 @@ class LocalDraftProvider:
             network=NetworkPolicy(mode=NetworkMode.LOCAL_ONLY)
         )
 
+        temp = 0.9 if style_mode == "banter" else 0.7
+        timeout = self._initial_timeout_seconds if self._is_first_call else self._timeout_seconds
+        self._is_first_call = False
+
         request = ModelRequest(
             prompt=prompt,
             system_prompt=system_prompt,
             model_alias=self._model_alias,
             task_category=TaskCategory.GENERAL_CHAT,
-            max_tokens=256,
-            temperature=0.7,
+            max_tokens=self._num_predict,
+            temperature=temp,
+            metadata={
+                "think": False,
+                "use_chat": True,
+                "keep_alive": self._keep_alive,
+                "options": {
+                    "num_predict": self._num_predict,
+                    "num_ctx": self._num_ctx,
+                    "temperature": temp,
+                },
+                "timeout_seconds": timeout,
+            },
             required_capabilities=[],  # ZERO TOOLS
         )
 
@@ -654,6 +702,7 @@ class LocalDraftProvider:
         label: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[str]]:
         """Validate and sanitize candidate draft text according to security requirements."""
+        candidate = strip_thinking_tags(candidate)
         if not candidate or not candidate.strip():
             return False, "", "Empty draft output"
 
@@ -840,7 +889,7 @@ class LocalDraftProvider:
         # 7. Generate draft
         if effective_mode == "banter":
             prompt, system_prompt = self._build_prompts("banter", ctx.label, spotlight_block, nonce)
-            raw_output = self._call_model(prompt, system_prompt)
+            raw_output = strip_thinking_tags(self._call_model(prompt, system_prompt, style_mode="banter"))
             valid, candidate, reason = self._validate_and_sanitize_output(
                 raw_output,
                 allowed_entities,
@@ -876,7 +925,7 @@ class LocalDraftProvider:
         prompt, system_prompt = self._build_prompts("normal", ctx.label, spotlight_block, nonce)
         last_error = None
         for attempt in range(2):
-            raw_output = self._call_model(prompt, system_prompt)
+            raw_output = strip_thinking_tags(self._call_model(prompt, system_prompt, style_mode="normal"))
             valid, candidate, reason = self._validate_and_sanitize_output(
                 raw_output,
                 allowed_entities,

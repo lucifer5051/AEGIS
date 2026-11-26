@@ -86,3 +86,4 @@ node_modules/
 whatsapp_session/
 *.whatsapp_session/
 logs/
+smoke_results/
