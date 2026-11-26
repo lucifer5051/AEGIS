@@ -38,9 +38,10 @@ def test_02_readme_canonical_identity():
     assert "System for Autonomous Guidance & Execution" in content
     # Canonical definition
     assert (
-        "SAGE is a personal autonomous AI system that understands user goals, "
-        "plans and executes tasks, manages context and memory, coordinates skills "
-        "and tools, and operates within deterministic security and permission boundaries."
+        "SAGE is a local-first, personal autonomous AI workstation and multi-agent coordination environment. "
+        "It orchestrates digital workflows, manages long-term contextual memory, automates Windows desktop "
+        "applications, interacts via text and voice, and executes complex tasks across local and cloud language "
+        "models under unbypassable deterministic security governance."
     ) in content
 
 

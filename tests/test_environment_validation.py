@@ -44,15 +44,15 @@ def test_02_running_in_isolated_virtual_environment():
 
 
 def test_03_canonical_repository_root_detected():
-    """Assert canonical repository root matches canonical aeigs project path."""
+    """Assert canonical repository root contains project marker files and directories."""
     root = get_canonical_root()
     assert root.exists(), f"Repository root does not exist: {root}"
-    # Check folder name is aeigs
-    assert root.name.lower() == "aeigs", f"Expected folder name 'aeigs', got: {root.name}"
+    # Detect repository root by marker files
+    assert (root / "pyproject.toml").is_file(), "pyproject.toml not found at repository root"
+    assert (root / "src").is_dir(), "src directory not found at repository root"
     # Verify key architectural directories exist
     assert (root / "docs").is_dir()
     assert (root / "schemas").is_dir()
-    assert (root / "src").is_dir()
     assert (root / "tests").is_dir()
 
 
