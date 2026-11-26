@@ -258,6 +258,84 @@ def is_protected_topic(
     return False, None
 
 
+_DEFAULT_URGENT_PHRASES: Tuple[str, ...] = (
+    # Self-harm & suicide
+    "suicide", "suicidal", "kill myself", "killing myself", "want to die", "end my life",
+    "self harm", "cutting myself", "aatmhatya", "khudkushi", "jaan de dunga", "marne ja raha hu",
+    "आत्महत्या", "खुदकुशी", "जान दे दूंगा", "मरने जा रहा हूं", "jeev denar", "जीव देणार",
+    # Medical emergencies
+    "chest pain", "cannot breathe", "cant breathe", "can't breathe", "accident", "bleeding",
+    "unconscious", "ambulance", "heart attack", "stroke", "seene me dard", "saans nahi aa rahi",
+    "सीने में दर्द", "सांस नहीं आ रही", "एंबुलेंस बुलाओ", "chhatit dukhatahe", "shwas gheta yet nahi",
+    "छातीत दुखत आहे", "श्वास घेता येत नाही", "रुग्णवाहिका बोलवा",
+    # Threats to safety
+    "someone is breaking in", "break in", "under attack", "stalker", "domestic violence", "in danger",
+    "bachao", "बचाओ", "vachva", "वाचवा",
+    # Please call me / help me urgently
+    "please call me urgently", "call me urgently", "call me immediately", "help me urgently",
+    "turant call karo", "jaldi call karo", "तुरंत कॉल करो", "lagach call kar", "लगेच कॉल कर",
+)
+
+_URGENT_CACHE: Dict[str, Tuple[re.Pattern, ...]] = {}
+
+
+def load_urgent_phrases(path: Optional[str] = None) -> Tuple[re.Pattern, ...]:
+    """Load urgent/crisis phrase and regex patterns from file or built-ins."""
+    target_path = Path(path) if path else Path("config/whatsapp_urgent_phrases.txt")
+    cache_key = str(target_path.resolve()) if target_path.exists() else f"__default__{path}__"
+    if cache_key in _URGENT_CACHE:
+        return _URGENT_CACHE[cache_key]
+
+    raw_lines: List[str] = []
+    if target_path.exists():
+        try:
+            with open(target_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if s and not s.startswith("#"):
+                        raw_lines.append(s)
+        except Exception as exc:
+            logger.warning("Could not load urgent phrases from %s: %s", target_path, exc)
+
+    if not raw_lines:
+        raw_lines = list(_DEFAULT_URGENT_PHRASES)
+
+    patterns: List[re.Pattern] = []
+    for line in raw_lines:
+        norm_line = normalize_text_for_matching(line)
+        if not norm_line:
+            continue
+        has_regex_meta = any(c in line for c in r"|()[]*+?^$")
+        try:
+            if has_regex_meta:
+                pat = re.compile(rf"(?<![\w\u0900-\u097F])(?:{norm_line})(?![\w\u0900-\u097F])", re.IGNORECASE)
+            else:
+                pat = re.compile(rf"(?<![\w\u0900-\u097F]){re.escape(norm_line)}(?![\w\u0900-\u097F])", re.IGNORECASE)
+            patterns.append(pat)
+        except Exception:
+            pat = re.compile(rf"(?<![\w\u0900-\u097F]){re.escape(norm_line)}(?![\w\u0900-\u097F])", re.IGNORECASE)
+            patterns.append(pat)
+
+    res = tuple(patterns)
+    _URGENT_CACHE[cache_key] = res
+    return res
+
+
+def is_urgent_message(
+    text: str,
+    patterns: Optional[Tuple[re.Pattern, ...]] = None,
+) -> bool:
+    """Check whether text matches any crisis or urgent medical/safety phrases."""
+    if not text:
+        return False
+    norm_text = normalize_text_for_matching(text)
+    active_patterns = patterns if patterns is not None else load_urgent_phrases()
+    for pat in active_patterns:
+        if pat.search(norm_text):
+            return True
+    return False
+
+
 _DEFAULT_BANNED_TERMS = {
     # English
     "fuck", "fucking", "fucker", "shit", "asshole", "bastard", "bitch",

@@ -1,0 +1,227 @@
+# SAGE WhatsApp Urgent & Crisis Detection Phrases
+# Owner-extendable: plain text phrases or regex patterns (one per line).
+# Comments start with #, empty lines are ignored.
+# Matching uses NFKC normalization, zero-width stripping, case-insensitivity,
+# and word boundary matching.
+
+# -----------------------------------------------------------------------------
+# 1. Self-Harm & Suicide
+# -----------------------------------------------------------------------------
+# English
+suicide
+suicidal
+kill myself
+killing myself
+want to die
+end my life
+end it all
+self harm
+self-harm
+cutting myself
+hang myself
+
+# Hindi (Roman / Hinglish)
+aatmhatya
+atmahatya
+khudkushi
+jaan de dunga
+jaan de dungi
+marne ja raha hu
+marne ja rahi hu
+khud ko maar dunga
+khud ko maar dungi
+zehar khaa liya
+
+# Hindi (Devanagari)
+आत्महत्या
+खुदकुशी
+जान दे दूंगा
+जान दे दूंगी
+मरने जा रहा हूं
+मरने जा रही हूं
+खुद को मार दूंगा
+खुद को मार दूंगी
+मरना चाहता हूं
+मरना चाहती हूं
+
+# Marathi (Roman)
+aatmhatya
+jeev denar
+jeev detoy
+marun janar
+swatahla sampavnar
+swatahla marun ghenar
+
+# Marathi (Devanagari)
+आत्महत्या
+जीव देणार
+जीव देतोय
+जीव देतेय
+मरणार आहे
+स्वतःला संपवणार
+स्वतःला मारून घेणार
+
+# -----------------------------------------------------------------------------
+# 2. Medical Emergencies
+# -----------------------------------------------------------------------------
+# English
+chest pain
+cannot breathe
+cant breathe
+can't breathe
+shortness of breath
+heart attack
+stroke
+bleeding heavily
+severe bleeding
+bleeding profusely
+bleeding
+unconscious
+ambulance
+accident
+car accident
+bike accident
+road accident
+overdose
+poisoning
+
+# Hindi (Roman / Hinglish)
+seene me dard
+seene mein dard
+saans nahi aa rahi
+saans lene me takleef
+heart attack
+dil ka daura
+accident ho gaya
+bohot khoon beh raha hai
+khoon nikal raha hai
+behosh
+ambulance bulao
+
+# Hindi (Devanagari)
+सीने में दर्द
+सांस नहीं आ रही
+सांस लेने में तकलीफ
+दिल का दौरा
+एक्सीडेंट हो गया
+खून बह रहा है
+बेहोश
+बेहोशी
+एंबुलेंस बुलाओ
+
+# Marathi (Roman)
+chhatit dukhatahe
+chhatit dukhate
+shwas gheta yet nahi
+shwas lagtoy
+apghat jhala
+khup rakt yet ahe
+raktasrav
+behosh
+beshuddh
+ambulance bolva
+
+# Marathi (Devanagari)
+छातीत दुखत आहे
+छातीत कळ
+श्वास घेता येत नाही
+श्वास लागतोय
+अपघात झाला
+रक्त येत आहे
+रक्तस्त्राव
+बेशुद्ध
+रुग्णवाहिका बोलवा
+
+# -----------------------------------------------------------------------------
+# 3. Threats to Safety & Immediate Danger
+# -----------------------------------------------------------------------------
+# English
+someone is breaking in
+break in
+under attack
+being attacked
+stalker
+stalking me
+threatened
+they have a weapon
+they have a gun
+they have a knife
+domestic violence
+in danger
+immediate danger
+they are going to kill me
+
+# Hindi (Roman / Hinglish)
+koi ghar me ghus gaya
+ghar me chor ghus gaya
+hamla hua
+khatre me hu
+khatre mein hu
+jaan ka khatra
+bachao mujhe
+bachao
+
+# Hindi (Devanagari)
+कोई घर में घुस गया
+घर में चोर घुस गया
+हमला हुआ
+खतरे में हूं
+जान का खतरा
+बचाओ मुझे
+बचाओ
+
+# Marathi (Roman)
+gharatch ghusla
+halla jhala
+dhokyat ahe
+dhoka ahe
+vaachva
+vachva
+
+# Marathi (Devanagari)
+घरात घुसला
+हल्ला झाला
+धोक्यात आहे
+धोका आहे
+वाचवा
+
+# -----------------------------------------------------------------------------
+# 4. Please Call Me / Help Me Urgently
+# -----------------------------------------------------------------------------
+# English
+please call me urgently
+call me urgently
+call me immediately
+call me right now
+help me urgently
+urgent help needed
+emergency call me
+it's an emergency call me
+
+# Hindi (Roman / Hinglish)
+turant call karo
+jaldi call karo
+jaldi phone karo
+emergency hai call karo
+urgent madad chahiye
+turant madad chahiye
+
+# Hindi (Devanagari)
+तुरंत कॉल करो
+जल्दी कॉल करो
+जल्दी फोन करो
+इमरजेंसी है कॉल करो
+तुरंत मदद चाहिए
+
+# Marathi (Roman)
+lagach call kar
+tavadtob phone kar
+urgent ahe call kar
+madat havi ahe lagach
+tatkal madat havi
+
+# Marathi (Devanagari)
+लगेच कॉल कर
+तातडीने फोन कर
+इमर्जन्सी आहे कॉल कर
+तातडीची मदत हवी आहे

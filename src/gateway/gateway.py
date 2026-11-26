@@ -25,6 +25,7 @@ from src.config.models import TelegramConfig, WhatsAppConfig
 from src.gateway.contact_alias import CANONICAL_PN_REGEX, ContactAliasStore
 from src.gateway.echo_registry import SelfEchoRegistry
 from src.gateway.errors import ChannelConfigError, TransportError
+from src.gateway.local_draft_provider import is_urgent_message
 from src.gateway.models import (
     OutboundStatus,
     ProcessResult,
@@ -122,6 +123,7 @@ class ChannelGateway:
         self._next_offset: Optional[int] = None
         self._running: bool = False
         self._last_draft_pipeline_notice: float = 0.0
+        self._last_urgent_notice_by_contact: Dict[str, float] = {}
 
     def _audit_drop(self, reason: str, sender_id: str, chat_id: str) -> None:
         masked_sender = mask_phone_number(sender_id)
@@ -559,6 +561,65 @@ class ChannelGateway:
 
             if not is_owner_sender:
                 # 1.1 Non-owner contact message: MUST NEVER reach CommandRouter, central_brain, or ToolBroker
+                # Store message in contact memory first if store is available
+                if self._contact_memory_store is not None:
+                    try:
+                        self._contact_memory_store.store_memory(
+                            contact_jid=sender_id_str,
+                            record_type="inbound_message",
+                            content={
+                                "message_id": channel_update_id,
+                                "text": text,
+                                "sender_id": sender_id_str,
+                                "chat_id": chat_id,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to store contact memory for contact: %s", exc)
+
+                # Check for crisis / urgent message: no draft, no model call, direct owner notice
+                if is_urgent_message(text):
+                    label = "Contact"
+                    if self._draft_manager is not None:
+                        try:
+                            settings = self._draft_manager.get_contact_settings(sender_id_str)
+                            label = settings.get("label") or "Contact"
+                        except Exception:
+                            pass
+                    last2 = sender_id_str.split("@")[0][-2:] if "@" in sender_id_str else sender_id_str[-2:]
+
+                    now_mono = time.monotonic()
+                    last_notice_time = self._last_urgent_notice_by_contact.get(sender_id_str, 0.0)
+                    is_rate_limited = (now_mono - last_notice_time) < 120.0
+
+                    if not is_rate_limited:
+                        self._last_urgent_notice_by_contact[sender_id_str] = now_mono
+                        if self._supervisor is not None and hasattr(self._supervisor, "send_owner_notice"):
+                            try:
+                                self._supervisor.send_owner_notice(
+                                    f"[AEGIS] URGENT: {label} (...{last2}) may need you. No draft prepared. Please read their message yourself and reply directly."
+                                )
+                            except Exception as exc:
+                                logger.error("Failed to notify owner of urgent message: %s", exc)
+
+                    self._audit_event(
+                        "urgent_message_no_draft",
+                        actor=sender_id_str,
+                        telemetry={"rate_limited": is_rate_limited, "contact": f"***{last2}"},
+                    )
+
+                    self._store.transition_update_state(
+                        rec.update_id,
+                        UpdateLifecycleState.COMPLETED,
+                    )
+                    return ProcessResult(
+                        update_id=rec.update_id,
+                        channel_update_id=channel_update_id,
+                        sender_id=sender_id_str,
+                        state=UpdateLifecycleState.COMPLETED,
+                        error_summary="urgent_message_no_draft",
+                    )
+
                 if self._draft_manager is None:
                     # Fail-closed: store nothing extra, audit reason, mark update FAILED.
                     self._audit_event(
@@ -590,23 +651,9 @@ class ChannelGateway:
                         error_summary="draft_pipeline_unavailable",
                     )
 
-                # Draft pipeline is available: store contact memory and retrieve context
+                # Draft pipeline is available: retrieve recent memory context
                 contact_memories: List[Dict[str, Any]] = []
                 if self._contact_memory_store is not None:
-                    try:
-                        self._contact_memory_store.store_memory(
-                            contact_jid=sender_id_str,
-                            record_type="inbound_message",
-                            content={
-                                "message_id": channel_update_id,
-                                "text": text,
-                                "sender_id": sender_id_str,
-                                "chat_id": chat_id,
-                            },
-                        )
-                    except Exception as exc:
-                        logger.warning("Failed to store contact memory for contact: %s", exc)
-
                     try:
                         contact_memories = self._contact_memory_store.list_contact_memories(
                             contact_jid=sender_id_str, limit=5
