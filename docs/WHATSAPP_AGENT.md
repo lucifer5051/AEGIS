@@ -85,7 +85,7 @@ flowchart TD
 ### 3.2 Indirect Prompt Injection Defense
 - **Spotlighting with Dynamic Nonces**: Inbound contact texts are enclosed within high-entropy cryptographic nonces: `<<<USER_INPUT_<nonce>>>> ... <<</USER_INPUT_<nonce>>>>`.
 - **Delimiter Sanitization**: Literal occurrences of delimiter fragments (`<<<`, `>>>`, `SYSTEM OVERRIDE`, etc.) inside message text are escaped or normalized prior to model ingestion.
-- **Heuristic Injection Screening**: Inbound texts are scanned against high-entropy prompt injection heuristics (e.g., instructions to ignore constraints, reveal passwords, or leak nonces). If detected, an injection hint is injected into the local prompt, the draft is forced to neutral tone, and a high-visibility `⚠️ WARNING: Possible prompt injection detected` badge is attached to the owner's approval card.
+- **Heuristic Injection Screening**: Inbound texts are scanned against high-entropy prompt injection heuristics (e.g., instructions to ignore constraints, reveal passwords, or leak nonces). If detected, an injection hint is injected into the local prompt, the draft is forced to neutral tone, and a high-visibility `[WARNING] message looks like an instruction aimed at the assistant` badge is attached to the owner's approval card.
 - **Output Leak Screening**: The generated draft is verified to ensure it never quotes the cryptographic nonce, system instructions, or internal delimiter tags.
 
 ### 3.3 Contact Isolation & PII Protection

@@ -15,7 +15,6 @@ Invariants:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 import secrets
@@ -30,7 +29,7 @@ from src.security.contact_key_store import (
     ContactKeyStore,
     normalize_and_validate_contact_jid,
 )
-from src.security.crypto import AES256GCMCipher, DecryptionError
+from src.security.crypto import AES256GCMCipher
 from src.trust.audit import AuditDecision, AuditEventType, AuditWriter, _check_no_secrets
 
 logger = logging.getLogger(__name__)
@@ -114,7 +113,7 @@ def format_approval_card(
     else:
         banter_tag = ""
     d_id = draft_id.upper()
-    warning_line = "⚠️ WARNING: Possible prompt injection detected in contact message!\n" if has_injection_warning else ""
+    warning_line = "[WARNING] message looks like an instruction aimed at the assistant\n" if has_injection_warning else ""
     return (
         f"[AEGIS] Draft #{d_id}{banter_tag}{tag}\n"
         f"{warning_line}"

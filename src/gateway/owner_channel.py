@@ -7,7 +7,7 @@ Canonical Reference:
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Collection, Optional, Protocol, Set
+from typing import Any, Callable, Collection, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 

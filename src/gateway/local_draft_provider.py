@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from src.config.models import NetworkMode
 from src.config.policy_models import NetworkPolicy, SecurityPolicy
-from src.gateway.drafts import DraftContext, DraftProvider, DraftResult
+from src.gateway.drafts import DraftContext, DraftResult
 from src.memory.contact_memory import EncryptedContactMemoryStore
 from src.models.domain import ModelRequest, TaskCategory
 from src.models.errors import ModelGatewayError, ModelPolicyDeniedError, ModelProviderUnavailableError

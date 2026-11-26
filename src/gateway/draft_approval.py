@@ -23,17 +23,9 @@ from typing import Any, Collection, Dict, Optional, Tuple
 
 from src.gateway.baileys_sidecar import BaileysSidecarSupervisor
 from src.gateway.drafts import DraftManager, _build_draft_aad
-from src.gateway.errors import GatewayError, TransportError
-from src.gateway.send_authorization import (
-    AuthorizationMismatchError,
-    RateLimitedError,
-    SendAuthorization,
-    SidecarTimeoutError,
-    TargetNotAllowedError,
-    create_send_authorization,
-)
+from src.gateway.send_authorization import create_send_authorization
 from src.security.contact_key_store import ContactKeyStore
-from src.security.crypto import AES256GCMCipher, DecryptionError
+from src.security.crypto import AES256GCMCipher
 from src.trust.audit import AuditDecision, AuditEventType, AuditWriter
 
 logger = logging.getLogger(__name__)

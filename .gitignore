@@ -82,5 +82,7 @@ $RECYCLE.BIN/
 
 # Node.js and WhatsApp Bridge
 bridge/node_modules/
+node_modules/
 whatsapp_session/
 *.whatsapp_session/
+logs/

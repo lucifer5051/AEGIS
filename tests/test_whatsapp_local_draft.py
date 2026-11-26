@@ -312,7 +312,7 @@ def test_2_6_card_displays_warning_flag(temp_db, key_store):
     )
     assert res["has_injection_warning"] is True
     card = res["card"]
-    assert "⚠️ WARNING: Possible prompt injection detected in contact message!" in card
+    assert "[WARNING] message looks like an instruction aimed at the assistant" in card
 
 
 # ==============================================================================

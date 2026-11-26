@@ -13,23 +13,21 @@ Invariants:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
-import os
 import re
 import signal
 import subprocess
 import sys
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.config.models import MAX_WHATSAPP_CONTACTS, WhatsAppConfig
-from src.gateway.baileys_sidecar import BaileysSidecarSupervisor, generate_allowlist_file
+from src.gateway.baileys_sidecar import BaileysSidecarSupervisor
 from src.gateway.contact_alias import ContactAliasStore
-from src.gateway.draft_approval import approve_and_send_draft
 from src.gateway.drafts import DraftManager
 from src.gateway.echo_registry import SelfEchoRegistry
 from src.gateway.gateway import ChannelGateway
@@ -37,14 +35,11 @@ from src.gateway.local_draft_provider import LocalDraftProvider
 from src.gateway.owner_channel import OwnerCommandHandler
 from src.gateway.store import GatewayStore
 from src.gateway.whatsapp_transport import SimulatedWhatsAppTransport
-from src.models.domain import ProviderType
-from src.security.contact_key_store import (
-    ContactKeyStore,
-    normalize_and_validate_contact_jid,
-)
+from src.models.domain import ProviderHealthStatus, ProviderType
+from src.security.contact_key_store import ContactKeyStore
 from src.memory.contact_memory import EncryptedContactMemoryStore
 from src.security.dpapi import WindowsDPAPIKeyProtector
-from src.storage.database import initialize_runtime_database
+from src.storage.database import initialize_runtime_database, is_database_encrypted
 from src.storage.migrations import (
     get_current_schema_version,
     load_migrations_from_directory,
@@ -82,14 +77,15 @@ def run_preflight(
     model_alias: Optional[str] = None,
     custom_llm: Optional[Callable[[str, str], str]] = None,
     db_conn: Optional[Any] = None,
+    simulate_mode: bool = False,
 ) -> Tuple[bool, Optional[str]]:
-    """Execute the 7 required preflight safety checks.
+    """Execute the required preflight safety checks.
 
     Returns:
         (True, None) if all checks pass.
         (False, error_message) describing what failed and how to fix it.
     """
-    # 1. Database readable and schema at latest version
+    # 1. Database readable, schema at latest version, and explicit encryption assertion
     try:
         latest_migrations = load_migrations_from_directory(migrations_dir)
         max_migration_v = max((m.version for m in latest_migrations), default=0)
@@ -126,6 +122,43 @@ def run_preflight(
             pass
 
     try:
+        # Verify SQLCipher is active
+        try:
+            cipher_cur = conn.execute("PRAGMA cipher_version;")
+            cipher_row = cipher_cur.fetchone()
+            if not cipher_row or not cipher_row[0]:
+                return (
+                    False,
+                    "Preflight Check 1 Failed: SQLCipher is not active (PRAGMA cipher_version returned empty). "
+                    "AEGIS strictly requires an active encrypted database.",
+                )
+        except Exception as exc:
+            return (
+                False,
+                f"Preflight Check 1 Failed: Error querying SQLCipher cipher_version: {exc}.",
+            )
+
+        # Verify on-disk file cannot be read as plaintext SQLite
+        if db_path.exists() and str(db_path) != ":memory:":
+            if not is_database_encrypted(db_path):
+                return (
+                    False,
+                    f"Preflight Check 1 Failed: Database file at '{db_path}' is unencrypted plaintext SQLite. "
+                    "AEGIS strictly requires an encrypted SQLCipher database.",
+                )
+            try:
+                import sqlite3 as raw_sqlite3
+                raw_conn = raw_sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                raw_conn.execute("SELECT count(*) FROM sqlite_master;").fetchone()
+                raw_conn.close()
+                return (
+                    False,
+                    f"Preflight Check 1 Failed: Database file at '{db_path}' can be read as plaintext SQLite without a key. "
+                    "SQLCipher whole-database encryption assertion failed.",
+                )
+            except Exception:
+                pass  # Plaintext reading failed as expected
+
         current_v = get_current_schema_version(conn)
         if current_v < max_migration_v:
             return (
@@ -133,53 +166,78 @@ def run_preflight(
                 f"Preflight Check 1 Failed: Database schema is at version {current_v}, but "
                 f"latest migration is {max_migration_v}. Run database migrations before starting.",
             )
-    except Exception as exc:
-        return (
-            False,
-            f"Preflight Check 1 Failed: Error querying schema version: {exc}. "
-            "Verify database health and schema_migrations table.",
-        )
 
-    # 2. At least one contact whitelisted
-    try:
-        cur = conn.execute("SELECT COUNT(*) FROM whatsapp_contact_settings")
-        contact_count = cur.fetchone()[0]
-        if contact_count == 0:
+        # 2. At least one contact whitelisted & owner not in whitelist
+        try:
+            cur = conn.execute("SELECT COUNT(*) FROM whatsapp_contact_settings")
+            contact_count = cur.fetchone()[0]
+            if contact_count == 0:
+                return (
+                    False,
+                    "Preflight Check 2 Failed: No contacts whitelisted. At least one contact must "
+                    "be whitelisted. Add a contact using:\n"
+                    "  python -m src.cli whatsapp contacts add <number> [--label NAME] [--mode {normal,banter}]",
+                )
+        except Exception as exc:
             return (
                 False,
-                "Preflight Check 2 Failed: No contacts whitelisted. At least one contact must "
-                "be whitelisted. Add a contact using:\n"
-                "  python -m src.cli whatsapp contacts add <number> [--label NAME] [--mode {normal,banter}]",
+                f"Preflight Check 2 Failed: Could not query whatsapp_contact_settings: {exc}. "
+                "Ensure migration 0011 has been applied.",
             )
-    except Exception as exc:
-        return (
-            False,
-            f"Preflight Check 2 Failed: Could not query whatsapp_contact_settings: {exc}. "
-            "Ensure migration 0011 has been applied.",
-        )
+
+        # 3. Owner JID configured and not in contact whitelist
+        if not owner_jid or not owner_jid.strip():
+            return (
+                False,
+                "Preflight Check 3 Failed: Owner JID is not configured. Set 'whatsapp.owner_jid' "
+                "in configuration (format: <digits>@s.whatsapp.net).",
+            )
+        clean_owner = owner_jid.strip()
+        if not _CANONICAL_PN_REGEX.match(clean_owner):
+            return (
+                False,
+                f"Preflight Check 3 Failed: Owner JID '{mask_jid(clean_owner)}' is invalid. "
+                "Must be a canonical phone number JID in format: <digits>@s.whatsapp.net",
+            )
+
+        # Fail preflight if owner_jid appears in the contact whitelist
+        try:
+            cur = conn.execute(
+                "SELECT 1 FROM whatsapp_contact_settings WHERE contact_jid = ?",
+                (clean_owner,),
+            )
+            if cur.fetchone() is not None:
+                return (
+                    False,
+                    f"Preflight Check 2 Failed: Owner JID '{mask_jid(clean_owner)}' is present in the contact whitelist. "
+                    "The owner cannot be a managed contact.",
+                )
+        except Exception as exc:
+            return (
+                False,
+                f"Preflight Check 2 Failed: Could not verify owner JID against whitelist: {exc}.",
+            )
+
     finally:
-        if close_conn:
+        if close_conn and conn is not None:
             try:
                 conn.close()
             except Exception:
                 pass
 
-    # 3. Owner JID configured
-    if not owner_jid or not owner_jid.strip():
-        return (
-            False,
-            "Preflight Check 3 Failed: Owner JID is not configured. Set 'whatsapp.owner_jid' "
-            "in configuration (format: <digits>@s.whatsapp.net).",
-        )
-    clean_owner = owner_jid.strip()
-    if not _CANONICAL_PN_REGEX.match(clean_owner):
-        return (
-            False,
-            f"Preflight Check 3 Failed: Owner JID '{mask_jid(clean_owner)}' is invalid. "
-            "Must be a canonical phone number JID in format: <digits>@s.whatsapp.net",
-        )
+    # 4. Node.js >= minimum version from bridge/package.json
+    min_node_ver = 22
+    pkg_json = bridge_dir / "package.json"
+    if pkg_json.exists():
+        try:
+            pkg_data = json.loads(pkg_json.read_text(encoding="utf-8"))
+            engine_node = pkg_data.get("engines", {}).get("node", ">=22")
+            m_eng = re.search(r">=?\s*(\d+)", engine_node)
+            if m_eng:
+                min_node_ver = int(m_eng.group(1))
+        except Exception:
+            min_node_ver = 22
 
-    # 4. Node.js >= 18 on PATH
     try:
         proc = subprocess.run(
             ["node", "--version"],
@@ -192,21 +250,21 @@ def run_preflight(
             return (
                 False,
                 "Preflight Check 4 Failed: 'node --version' returned a non-zero exit code. "
-                "Ensure Node.js is installed and functioning correctly on PATH.",
+                f"Ensure Node.js >= {min_node_ver} is installed and functioning correctly on PATH.",
             )
         node_ver_str = proc.stdout.strip()
         match = re.search(r"v(\d+)\.", node_ver_str)
-        if not match or int(match.group(1)) < 18:
+        if not match or int(match.group(1)) < min_node_ver:
             return (
                 False,
-                f"Preflight Check 4 Failed: Node.js version {node_ver_str} found, but Node.js >= 18 "
-                "is required by the Baileys bridge. Please upgrade Node.js to version 18 or higher.",
+                f"Preflight Check 4 Failed: Node.js version {node_ver_str} found, but Node.js >= {min_node_ver} "
+                f"is required by the Baileys bridge. Please upgrade Node.js to version {min_node_ver} or higher.",
             )
     except FileNotFoundError:
         return (
             False,
-            "Preflight Check 4 Failed: Node.js executable ('node') was not found on PATH. "
-            "Please install Node.js >= 18 and add it to your system PATH.",
+            f"Preflight Check 4 Failed: Node.js executable ('node') was not found on PATH. "
+            f"Please install Node.js >= {min_node_ver} and add it to your system PATH.",
         )
     except Exception as exc:
         return (
@@ -223,7 +281,7 @@ def run_preflight(
             f"Run 'npm install' inside '{bridge_dir}' before running the WhatsApp gateway.",
         )
 
-    # 6. Local model available (configured and verified local; refuse if cloud)
+    # 6. Local model available & reachable (LIVE mode only pings)
     if custom_llm is None:
         if model_gateway is None:
             return (
@@ -231,10 +289,9 @@ def run_preflight(
                 "Preflight Check 6 Failed: No model gateway or custom LLM configured. WhatsApp agent "
                 "strictly requires a verified local model to draft replies without leaking contact text.",
             )
-        # Check that the gateway has local reasoning / chat capability
+        alias = model_alias or "local"
+        desc = None
         try:
-            alias = model_alias or "local"
-            # Inspect registry if available
             if hasattr(model_gateway, "registry") and model_gateway.registry:
                 reg = model_gateway.registry
                 desc = reg.get_model(alias) if hasattr(reg, "get_model") else None
@@ -245,7 +302,6 @@ def run_preflight(
                         f"'{desc.provider_id}' of type '{desc.provider_type}'. WhatsApp agent strictly "
                         "refuses to run unless model provider is LOCAL to prevent contact text leakage.",
                     )
-                # Verify that at least one local provider exists
                 local_models = reg.list_models(local_only=True) if hasattr(reg, "list_models") else []
                 if not desc and not local_models:
                     return (
@@ -258,6 +314,39 @@ def run_preflight(
                 False,
                 f"Preflight Check 6 Failed: Error checking local model availability: {exc}.",
             )
+
+        # LIVE mode only: call existing ModelGateway health facility with 5s timeout
+        if not simulate_mode:
+            prov_id = desc.provider_id if desc else alias
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    def _ping_health():
+                        if hasattr(model_gateway, "get_provider_health"):
+                            return model_gateway.get_provider_health(prov_id)
+                        elif hasattr(model_gateway, "registry"):
+                            return model_gateway.registry.get_provider_health(prov_id)
+                        return ProviderHealthStatus.HEALTHY
+                    fut = executor.submit(_ping_health)
+                    health_res = fut.result(timeout=5.0)
+
+                # Check health status
+                if hasattr(health_res, "status"):
+                    if health_res.status not in (ProviderHealthStatus.HEALTHY, ProviderHealthStatus.DEGRADED):
+                        err_detail = health_res.error_message or f"status {health_res.status.value}"
+                        return (
+                            False,
+                            f"Preflight Check 6 Failed: Local model provider '{prov_id}' is unreachable: {err_detail}",
+                        )
+            except concurrent.futures.TimeoutError:
+                return (
+                    False,
+                    f"Preflight Check 6 Failed: Local model provider '{prov_id}' ping timed out after 5.0 seconds.",
+                )
+            except Exception as exc:
+                return (
+                    False,
+                    f"Preflight Check 6 Failed: Local model health ping failed for '{prov_id}': {exc}",
+                )
 
     # 7. Auth state directory writable
     try:
