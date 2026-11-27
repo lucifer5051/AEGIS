@@ -16,14 +16,16 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import logging
+import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from src.config.models import MAX_WHATSAPP_CONTACTS, WhatsAppConfig
@@ -81,6 +83,196 @@ def is_loopback_host(url_or_host: str) -> bool:
         return hostname in ("127.0.0.1", "localhost", "::1")
     except Exception:
         return False
+
+
+def is_pid_alive(pid: int) -> bool:
+    """Check if a process with given PID is currently active."""
+    if pid <= 0:
+        return False
+    import platform
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                exit_code = ctypes.c_ulong()
+                ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                ctypes.windll.kernel32.CloseHandle(handle)
+                # STILL_ACTIVE = 259
+                return exit_code.value == 259
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+
+
+def build_icacls_harden_command(
+    auth_dir: Path,
+    user_domain: Optional[str] = None,
+    username: Optional[str] = None,
+) -> List[str]:
+    """Build the icacls command to strip inherited ACLs and grant full control to current user."""
+    u_name = username if username is not None else (os.environ.get("USERNAME") or "")
+    u_dom = user_domain if user_domain is not None else (os.environ.get("USERDOMAIN") or "")
+    principal = f"{u_dom}\\{u_name}" if u_dom and u_name else (u_name or u_dom)
+    return ["icacls", str(auth_dir), "/inheritance:r", "/grant:r", f"{principal}:(OI)(CI)F"]
+
+
+def build_icacls_verify_command(auth_dir: Path) -> List[str]:
+    """Build the icacls command to read back ACLs on the directory."""
+    return ["icacls", str(auth_dir)]
+
+
+def parse_and_verify_icacls_output(
+    stdout_text: str,
+    allowed_user: Optional[str] = None,
+    auth_dir_path: Optional[str] = None,
+) -> Tuple[bool, List[str]]:
+    """Parse icacls output and verify that ONLY allowed_user, SYSTEM, and Administrators have access.
+
+    Returns:
+        (is_valid, list_of_unauthorized_principals)
+    """
+    if not stdout_text or not stdout_text.strip():
+        return False, ["<empty_output>"]
+
+    allowed: Set[str] = {
+        "system",
+        "nt authority\\system",
+        "authority\\system",
+        "administrators",
+        "builtin\\administrators",
+    }
+    current_u = allowed_user or (
+        f"{os.environ.get('USERDOMAIN', '')}\\{os.environ.get('USERNAME', '')}"
+        if os.environ.get("USERDOMAIN") and os.environ.get("USERNAME")
+        else os.environ.get("USERNAME", "")
+    )
+    if current_u:
+        allowed.add(current_u.strip().lower())
+        if "\\" in current_u:
+            allowed.add(current_u.split("\\")[-1].strip().lower())
+
+    unauthorized: List[str] = []
+    lines = stdout_text.splitlines()
+
+    for line in lines:
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        if cleaned.lower().startswith("successfully processed") or cleaned.lower().startswith("processed file:"):
+            continue
+
+        if auth_dir_path and cleaned.startswith(auth_dir_path):
+            cleaned = cleaned[len(auth_dir_path):].strip()
+        else:
+            # Strip leading path if present (e.g. "C:\path\to\dir DOMAIN\user:(...)")
+            path_match = re.match(r"^(?:[A-Za-z]:\\[^\s]+|/[^\s]+|\\\\[^\s]+)\s+(.+)$", cleaned)
+            if path_match:
+                cleaned = path_match.group(1).strip()
+
+        if ":(" in cleaned:
+            principal = cleaned.split(":(")[0].strip()
+            if principal and principal.lower() not in allowed:
+                unauthorized.append(principal)
+
+    return len(unauthorized) == 0, unauthorized
+
+
+def harden_session_directory(auth_dir: Path) -> Tuple[bool, Optional[str]]:
+    """Restrict session directory ACLs to current Windows user (skipped on non-Windows)."""
+    import platform
+    if platform.system() != "Windows":
+        logger.info("Non-Windows OS detected (%s); skipping NTFS session directory ACL hardening.", platform.system())
+        return True, None
+
+    auth_dir.mkdir(parents=True, exist_ok=True)
+    harden_cmd = build_icacls_harden_command(auth_dir)
+    try:
+        proc = subprocess.run(harden_cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            return False, f"icacls failed (code {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}"
+    except Exception as exc:
+        return False, f"Failed executing icacls: {exc}"
+
+    verify_cmd = build_icacls_verify_command(auth_dir)
+    try:
+        proc = subprocess.run(verify_cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            return False, f"icacls verification read failed (code {proc.returncode}): {proc.stderr.strip()}"
+        is_valid, unauth = parse_and_verify_icacls_output(proc.stdout, auth_dir_path=str(auth_dir))
+        if not is_valid:
+            return False, f"Session directory has unauthorized access permissions: {unauth}"
+        return True, None
+    except Exception as exc:
+        return False, f"Failed verifying icacls permissions: {exc}"
+
+
+def unlink_whatsapp_session(
+    auth_dir: Path,
+    force_yes: bool = False,
+    confirm_input_fn: Optional[Callable[[], str]] = None,
+) -> int:
+    """Unlink and delete the WhatsApp session directory, verifying runtime is not active."""
+    # 1. Refuse if runtime is running
+    lock_file = auth_dir.parent / "runtime.lock"
+    if lock_file.exists():
+        try:
+            pid = int(lock_file.read_text(encoding="utf-8").strip())
+            if is_pid_alive(pid):
+                print(
+                    f"\n[ERROR] Cannot unlink WhatsApp session while runtime is running (PID {pid}). "
+                    "Stop the WhatsApp runtime before unlinking.\n",
+                    file=sys.stderr,
+                )
+                return 1
+        except Exception:
+            pass
+
+    # 2. Check if session directory exists
+    if not auth_dir.exists():
+        print(f"No WhatsApp session found at '{auth_dir}'.")
+        print("\nNow remove this linked device in WhatsApp on your phone: Settings > Linked devices.\n")
+        return 0
+
+    files_to_delete = list(auth_dir.rglob("*"))
+    file_count = len([f for f in files_to_delete if f.is_file()])
+    print("================================================================================")
+    print("WhatsApp Session Unlink")
+    print("================================================================================")
+    print(f"Directory: {auth_dir}")
+    print(f"Total items to delete: {len(files_to_delete)} ({file_count} files)")
+    for f in files_to_delete[:10]:
+        print(f"  - {f.relative_to(auth_dir)}")
+    if len(files_to_delete) > 10:
+        print(f"  ... and {len(files_to_delete) - 10} more items")
+    print("--------------------------------------------------------------------------------")
+
+    # 3. Confirmation check
+    if not force_yes:
+        prompt_fn = confirm_input_fn or (lambda: input("Are you sure you want to unlink and delete this session? Type 'yes' to confirm: "))
+        response = prompt_fn()
+        if response.strip().lower() != "yes":
+            print("Unlink cancelled.")
+            return 1
+
+    # 4. Delete directory
+    try:
+        shutil.rmtree(auth_dir)
+        print(f"Successfully deleted WhatsApp session directory: {auth_dir}")
+    except Exception as exc:
+        print(f"[ERROR] Failed to delete session directory: {exc}", file=sys.stderr)
+        return 1
+
+    # 5. Print mandatory reminder
+    print("\nNow remove this linked device in WhatsApp on your phone: Settings > Linked devices.\n")
+    return 0
 
 
 def build_local_model_gateway(
@@ -855,6 +1047,33 @@ def run_live_whatsapp(
         print(f"\n[PREFLIGHT ERROR] {err}\n", file=sys.stderr)
         return 1
 
+    # Enforce runtime lockfile
+    lock_file = auth_dir.parent / "runtime.lock"
+    if lock_file.exists():
+        try:
+            old_pid = int(lock_file.read_text(encoding="utf-8").strip())
+            if is_pid_alive(old_pid):
+                print(f"\n[LOCK ERROR] WhatsApp runtime is already running with PID {old_pid}.\n", file=sys.stderr)
+                return 1
+        except Exception:
+            pass
+    try:
+        auth_dir.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Could not write runtime lockfile: %s", exc)
+
+    # Harden session directory (NTFS permissions on Windows)
+    harden_ok, harden_err = harden_session_directory(auth_dir)
+    if not harden_ok:
+        print(f"\n[SECURITY ERROR] Failed to harden session directory '{auth_dir}': {harden_err}\n", file=sys.stderr)
+        try:
+            if lock_file.exists():
+                lock_file.unlink()
+        except Exception:
+            pass
+        return 1
+
     conn = initialize_runtime_database(db_path, migrations_dir=migrations_dir)
     key_protector = WindowsDPAPIKeyProtector()
     key_store = ContactKeyStore(conn, key_protector)
@@ -1035,6 +1254,12 @@ def run_live_whatsapp(
 
         try:
             conn.close()
+        except Exception:
+            pass
+
+        try:
+            if lock_file.exists():
+                lock_file.unlink()
         except Exception:
             pass
 

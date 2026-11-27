@@ -87,3 +87,4 @@ whatsapp_session/
 *.whatsapp_session/
 logs/
 smoke_results/
+eval_results/

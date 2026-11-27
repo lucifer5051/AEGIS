@@ -196,3 +196,37 @@ Inbound messages matching patterns in `config/whatsapp_urgent_phrases.txt` (self
 - **Zero LLM Calls**: ModelGateway is never invoked.
 - **Memory Preserved**: Stored in contact's encrypted memory store.
 - **Direct Owner Alert**: Supervisor delivers `"[AEGIS] URGENT: <label> (...NN) may need you. No draft prepared. Please read their message yourself and reply directly."` (rate-limited to 1 notice per contact per 2 minutes; excess logged to audit telemetry as `rate_limited: True`).
+
+---
+
+## 7. Session Storage Security, Known Gaps & Unlink Procedure
+
+### 7.1 NTFS Session Folder Hardening
+Before the Baileys bridge is spawned in live mode (`whatsapp run`), AEGIS automatically restricts permissions on the session directory (`~/.aegis/channels/whatsapp/session/`) via Windows `icacls`:
+- Inherited ACLs are stripped (`/inheritance:r`).
+- Full control is granted solely to the executing user (`/grant:r "<DOMAIN\USER>:(OI)(CI)F"`).
+- Permissions are read back and verified; startup is refused if unauthorized principals (other than the user, `SYSTEM`, or `Administrators`) retain access.
+- On non-Windows environments, NTFS hardening is gracefully skipped with an informational log line.
+
+### 7.2 Known Gaps & Residual Risks
+- **Plaintext at Rest**: Unlike AEGIS contact memories and SQLite databases (which are encrypted with SQLCipher and per-contact AES-256-GCM DEKs protected by Windows DPAPI), the underlying Baileys multi-file auth credentials (`creds.json`) are stored unencrypted on disk by the Node.js library.
+- **Protection Boundary**: The credentials are protected by operating system NTFS discretionary access controls (ACLs) only.
+- **Residual Risks**:
+  1. *Same-User Malware*: Any unauthorized process executing under the same user account can read `creds.json`.
+  2. *Disk Theft / Offline Extraction*: If the host drive is removed or accessed offline without full-disk encryption, session keys can be extracted.
+  3. *Recommendation*: Full-disk encryption (such as Windows BitLocker) is strongly recommended to protect session credentials when the machine is powered off.
+
+### 7.3 Unlink Procedure (`whatsapp unlink`)
+To securely remove local WhatsApp credentials and sever the pairing:
+```bash
+python -m src.cli whatsapp unlink [--yes]
+```
+1. **Safety Check**: Refuses execution if the WhatsApp runtime is actively running (enforced via PID lockfile check).
+2. **Review**: Displays the session directory path and lists the files that will be deleted.
+3. **Confirmation**: Prompts for interactive confirmation (or skips prompt if `--yes` is supplied).
+4. **Deletion**: Deletes the session directory completely.
+5. **Phone-Side Cleanup Reminder**: Reminds the user to complete unlinking on their mobile device:
+   ```text
+   Now remove this linked device in WhatsApp on your phone: Settings > Linked devices.
+   ```
+

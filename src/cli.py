@@ -99,6 +99,11 @@ def build_whatsapp_parser() -> argparse.ArgumentParser:
     # status
     subparsers.add_parser("status", help="Show WhatsApp gateway and bridge operational status.")
 
+    # unlink [--yes] [--auth-dir PATH]
+    unlink_parser = subparsers.add_parser("unlink", help="Unlink WhatsApp session and remove credentials.")
+    unlink_parser.add_argument("--yes", action="store_true", help="Confirm unlink without interactive prompt.")
+    unlink_parser.add_argument("--auth-dir", default=None, help="Directory for Baileys auth credentials.")
+
     # smoke-test [--fake] [--model NAME] [--ollama-host URL]
     smoke_parser = subparsers.add_parser("smoke-test", help="Run synthetic smoke test on drafting pipeline.")
     smoke_parser.add_argument("--fake", action="store_true", help="Use scripted fake model for offline/CI testing.")
@@ -178,6 +183,11 @@ def handle_whatsapp_cli(argv: list[str]) -> int:
         except Exception as exc:
             print(f"[ERROR] Could not read WhatsApp status: {exc}", file=sys.stderr)
             return 1
+
+    elif args.whatsapp_subcommand == "unlink":
+        from src.gateway.whatsapp_runtime import unlink_whatsapp_session
+        auth_dir = Path(args.auth_dir) if args.auth_dir else (Path.home() / ".aegis" / "channels" / "whatsapp" / "session")
+        return unlink_whatsapp_session(auth_dir=auth_dir, force_yes=args.yes)
 
     elif args.whatsapp_subcommand == "run":
         from src.gateway.whatsapp_runtime import run_live_whatsapp, run_simulated_whatsapp
