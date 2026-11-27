@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -500,14 +501,16 @@ def test_preflight_check7_auth_dir_not_writable(
 
 def test_whatsapp_status_reporting(populated_db_conn, tmp_path):
     conn, _ = populated_db_conn
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT12:00:00Z")
     with conn:
         conn.execute(
             """
             INSERT INTO whatsapp_gateway_state (key, value, updated_at)
-            VALUES ('bridge_status', 'CONNECTED', '2026-11-26T12:00:00Z'),
-                   ('paired_phone', '+919876543210', '2026-11-26T12:00:00Z'),
-                   ('bridge_start_time', '2026-11-26T12:00:00Z', '2026-11-26T12:00:00Z')
-            """
+            VALUES ('bridge_status', 'CONNECTED', ?),
+                   ('paired_phone', '+919876543210', ?),
+                   ('bridge_start_time', ?, ?)
+            """,
+            (now_iso, now_iso, now_iso, now_iso),
         )
         conn.execute(
             """
@@ -516,10 +519,11 @@ def test_whatsapp_status_reporting(populated_db_conn, tmp_path):
                 draft_nonce, text_sha256, status, created_at, expires_at,
                 decided_at, sent_message_id, edit_count
             ) VALUES
-            ('D1', '15550100001@s.whatsapp.net', 'm1', x'00', x'00', 'h1', 'pending', '2026-11-26T12:00:00Z', '2026-11-26T18:00:00Z', NULL, NULL, 0),
-            ('D2', '15550100001@s.whatsapp.net', 'm2', x'00', x'00', 'h2', 'approved', '2026-11-26T12:00:00Z', '2026-11-26T18:00:00Z', '2026-11-26T12:05:00Z', 's1', 0),
-            ('D3', '15550100001@s.whatsapp.net', 'm3', x'00', x'00', 'h3', 'rejected', '2026-11-26T12:00:00Z', '2026-11-26T18:00:00Z', '2026-11-26T12:10:00Z', NULL, 0)
-            """
+            ('D1', '15550100001@s.whatsapp.net', 'm1', x'00', x'00', 'h1', 'pending', ?, ?, NULL, NULL, 0),
+            ('D2', '15550100001@s.whatsapp.net', 'm2', x'00', x'00', 'h2', 'approved', ?, ?, ?, 's1', 0),
+            ('D3', '15550100001@s.whatsapp.net', 'm3', x'00', x'00', 'h3', 'rejected', ?, ?, ?, NULL, 0)
+            """,
+            (now_iso, now_iso, now_iso, now_iso, now_iso, now_iso, now_iso, now_iso),
         )
 
     status = get_whatsapp_status(conn)
