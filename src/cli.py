@@ -111,6 +111,20 @@ def build_whatsapp_parser() -> argparse.ArgumentParser:
     smoke_parser.add_argument("--model-alias", default=None, help="Model alias to test (legacy alias for --model).")
     smoke_parser.add_argument("--ollama-host", default="http://127.0.0.1:11434", help="Local Ollama daemon URL (default: http://127.0.0.1:11434).")
 
+    # eval [--model NAME] [--reps N] [--conditions D0,D1,D2,D3] [--quick] [--fake] [--out DIR] [--ollama-host URL]
+    eval_parser = subparsers.add_parser("eval", help="Run prompt injection defense evaluation harness.")
+    eval_parser.add_argument("--model", default="qwen3.5:4b", help="Model name to evaluate (default: qwen3.5:4b).")
+    eval_parser.add_argument("--reps", type=int, default=1, help="Repetitions per test case (default: 1).")
+    eval_parser.add_argument(
+        "--conditions",
+        default="D0,D1,D2,D3",
+        help="Comma-separated defense conditions to test (e.g. 'D0,D3').",
+    )
+    eval_parser.add_argument("--quick", action="store_true", help="Run quick subset (20 attacks, 10 benign, 1 rep).")
+    eval_parser.add_argument("--fake", action="store_true", help="Use scripted fake model for offline/CI evaluation.")
+    eval_parser.add_argument("--out", default=None, help="Output directory for results JSON and CSV.")
+    eval_parser.add_argument("--ollama-host", default="http://127.0.0.1:11434", help="Local Ollama daemon URL (default: http://127.0.0.1:11434).")
+
     contacts_parser = subparsers.add_parser("contacts", help="Manage whitelisted contacts.")
     contacts_sub = contacts_parser.add_subparsers(dest="contacts_action")
 
@@ -215,6 +229,21 @@ def handle_whatsapp_cli(argv: list[str]) -> int:
             model_alias=model_name,
             ollama_host=args.ollama_host,
         )
+
+    elif args.whatsapp_subcommand == "eval":
+        from src.gateway.whatsapp_eval import run_whatsapp_eval
+        conds = [c.strip() for c in args.conditions.split(",") if c.strip()]
+        out_dir = Path(args.out) if args.out else None
+        run_whatsapp_eval(
+            model_name=args.model,
+            reps=args.reps,
+            conditions=conds,
+            quick=args.quick,
+            use_fake=args.fake,
+            out_dir=out_dir,
+            ollama_host=args.ollama_host,
+        )
+        return 0
 
     if args.whatsapp_subcommand != "contacts" or not args.contacts_action:
         parser.print_help()

@@ -17,6 +17,7 @@ Invariants:
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 import logging
 import re
 import secrets
@@ -545,6 +546,20 @@ def strip_thinking_tags(text: str) -> str:
     return cleaned.strip()
 
 
+@dataclass
+class DraftDefenses:
+    """Security defense switches for messaging draft generation.
+
+    Production default: all True. Only the eval harness may configure non-default switches.
+    """
+
+    spotlighting: bool = True
+    delimiter_gate: bool = True
+    role_neutralisation: bool = True
+    output_validation: bool = True
+    injection_hint: bool = True
+
+
 class LocalDraftProvider:
     """Production local-model draft provider with injection defense and output validation."""
 
@@ -563,6 +578,7 @@ class LocalDraftProvider:
         keep_alive: str = "10m",
         timeout_seconds: float = 60.0,
         initial_timeout_seconds: float = 30.0,
+        defenses: Optional[DraftDefenses] = None,
     ) -> None:
         self._gateway = model_gateway
         self._memory_store = memory_store
@@ -577,6 +593,8 @@ class LocalDraftProvider:
         self._keep_alive = keep_alive
         self._timeout_seconds = timeout_seconds
         self._initial_timeout_seconds = initial_timeout_seconds
+        self._defenses = defenses if defenses is not None else DraftDefenses()
+        self.last_raw_output: Optional[str] = None
         self._is_first_call = True
 
     def build_context(self, ctx: DraftContext) -> Tuple[str, Set[str]]:
@@ -637,7 +655,7 @@ class LocalDraftProvider:
         # 5. Format history lines
         formatted_lines = []
         for msg in history_msgs:
-            sanitized = sanitize_delimiter_escapes(msg["text"])
+            sanitized = sanitize_delimiter_escapes(msg["text"]) if self._defenses.delimiter_gate else msg["text"]
             formatted_lines.append(f"{msg['role']}: {sanitized}")
 
         return "\n".join(formatted_lines), allowed_entities
@@ -706,6 +724,9 @@ class LocalDraftProvider:
         if not candidate or not candidate.strip():
             return False, "", "Empty draft output"
 
+        if not self._defenses.output_validation:
+            return True, candidate.strip(), None
+
         # 1. Nonce leak check
         if nonce and nonce.lower() in candidate.lower():
             return False, "", "Draft contains spotlight nonce"
@@ -728,15 +749,19 @@ class LocalDraftProvider:
                 return False, "", "Draft contains delimiter tag name"
 
         # 4. Strip model/assistant role prefixes first
-        cleaned = _ROLE_PREFIX_RE.sub("", candidate.strip()).strip()
+        if self._defenses.role_neutralisation:
+            cleaned = _ROLE_PREFIX_RE.sub("", candidate.strip()).strip()
+        else:
+            cleaned = candidate.strip()
 
         # 5. Quoting role-label prefix (Owner: or contact label) at start of a line
-        quoted_re = re.compile(
-            r"^(?:Owner|Assistant|System|" + (re.escape(label) + r"|" if label else "") + r"Contact):\s*",
-            re.IGNORECASE | re.MULTILINE,
-        )
-        if quoted_re.search(cleaned):
-            return False, "", "Draft quotes role label prefix at line start"
+        if self._defenses.role_neutralisation:
+            quoted_re = re.compile(
+                r"^(?:Owner|Assistant|System|" + (re.escape(label) + r"|" if label else "") + r"Contact):\s*",
+                re.IGNORECASE | re.MULTILINE,
+            )
+            if quoted_re.search(cleaned):
+                return False, "", "Draft quotes role label prefix at line start"
 
         # 6. Check for markdown headings or code fences
         if _HEADING_OR_CODE_RE.search(cleaned):
@@ -800,10 +825,33 @@ class LocalDraftProvider:
         style_mode: str,
         label: Optional[str],
         spotlight_block: str,
-        nonce: str,
+        nonce: Optional[str] = None,
     ) -> Tuple[str, str]:
         """Construct system instructions and user prompt based on style mode."""
         display_name = label or "the contact"
+        if not self._defenses.spotlighting:
+            if style_mode == "banter":
+                system_prompt = (
+                    "You are an AI assistant drafting a WhatsApp reply on behalf of the account owner in BANTER mode for a close friend.\n"
+                    "Draft a concise, playful reply (at most 2 short sentences)."
+                )
+                prompt = (
+                    f"Below is the conversation history with {display_name}:\n"
+                    f"{spotlight_block}\n\n"
+                    "Draft the playful banter reply (at most 2 short sentences):"
+                )
+            else:
+                system_prompt = (
+                    "You are an AI assistant drafting a WhatsApp reply on behalf of the account owner.\n"
+                    "Draft a concise, polite, natural reply (1 to 3 short sentences, under 600 characters)."
+                )
+                prompt = (
+                    f"Below is the conversation history with {display_name}:\n"
+                    f"{spotlight_block}\n\n"
+                    "Draft the proposed reply:"
+                )
+            return prompt, system_prompt
+
         if style_mode == "banter":
             system_prompt = (
                 "You are an AI assistant drafting a WhatsApp reply on behalf of the account owner in BANTER mode for a close friend.\n"
@@ -853,20 +901,32 @@ class LocalDraftProvider:
         history_text, allowed_entities = self.build_context(ctx)
 
         # 2. Delimiter gating on inbound text
-        sanitized_inbound = sanitize_delimiter_escapes(ctx.inbound_text)
+        sanitized_inbound = (
+            sanitize_delimiter_escapes(ctx.inbound_text)
+            if self._defenses.delimiter_gate
+            else ctx.inbound_text
+        )
 
         # 3. Create fresh random nonce for spotlighting
-        nonce = secrets.token_hex(8)
-
-        # 4. Construct spotlighted block
-        spotlight_block = f'<contact_messages nonce="{nonce}">\n'
-        if history_text:
-            spotlight_block += f"{history_text}\n"
-        spotlight_block += f"{ctx.label or 'Contact'}: {sanitized_inbound}\n"
-        spotlight_block += "</contact_messages>"
+        if self._defenses.spotlighting:
+            nonce = secrets.token_hex(8)
+            # 4. Construct spotlighted block
+            spotlight_block = f'<contact_messages nonce="{nonce}">\n'
+            if history_text:
+                spotlight_block += f"{history_text}\n"
+            spotlight_block += f"{ctx.label or 'Contact'}: {sanitized_inbound}\n"
+            spotlight_block += "</contact_messages>"
+        else:
+            nonce = None
+            spotlight_block = ""
+            if history_text:
+                spotlight_block += f"{history_text}\n"
+            spotlight_block += f"{ctx.label or 'Contact'}: {sanitized_inbound}"
 
         # 5. Check prompt injection heuristics
-        has_inj, inj_type = check_prompt_injection(ctx.inbound_text)
+        has_inj = False
+        if self._defenses.injection_hint:
+            has_inj, inj_type = check_prompt_injection(ctx.inbound_text)
 
         # 6. Screening scope in banter mode: check inbound text AND history messages
         effective_mode = ctx.style_mode
@@ -890,6 +950,7 @@ class LocalDraftProvider:
         if effective_mode == "banter":
             prompt, system_prompt = self._build_prompts("banter", ctx.label, spotlight_block, nonce)
             raw_output = strip_thinking_tags(self._call_model(prompt, system_prompt, style_mode="banter"))
+            self.last_raw_output = raw_output
             valid, candidate, reason = self._validate_and_sanitize_output(
                 raw_output,
                 allowed_entities,
@@ -914,6 +975,7 @@ class LocalDraftProvider:
                         banter_suppressed=False,
                         suppression_reason_code=None,
                         injection_flag=has_inj,
+                        raw_text=raw_output,
                     )
             else:
                 # Banter validation failed: demote to normal mode
@@ -926,6 +988,7 @@ class LocalDraftProvider:
         last_error = None
         for attempt in range(2):
             raw_output = strip_thinking_tags(self._call_model(prompt, system_prompt, style_mode="normal"))
+            self.last_raw_output = raw_output
             valid, candidate, reason = self._validate_and_sanitize_output(
                 raw_output,
                 allowed_entities,
@@ -941,6 +1004,7 @@ class LocalDraftProvider:
                     banter_suppressed=banter_suppressed,
                     suppression_reason_code=suppression_reason,
                     injection_flag=has_inj,
+                    raw_text=raw_output,
                 )
             last_error = reason
 

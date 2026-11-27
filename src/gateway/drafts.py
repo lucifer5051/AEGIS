@@ -133,6 +133,7 @@ class DraftResult:
     banter_suppressed: bool = False
     suppression_reason_code: Optional[str] = None
     injection_flag: bool = False
+    raw_text: Optional[str] = None
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, str):

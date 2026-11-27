@@ -790,6 +790,16 @@ def run_simulated_whatsapp(
             return "I cannot help with that request."
         return "Hey! Received your message. Will get back to you shortly."
 
+    from src.gateway.local_draft_provider import DraftDefenses, LocalDraftProvider
+    sim_defenses = DraftDefenses()
+    assert (
+        sim_defenses.spotlighting
+        and sim_defenses.delimiter_gate
+        and sim_defenses.role_neutralisation
+        and sim_defenses.output_validation
+        and sim_defenses.injection_hint
+    ), "Simulation runtime strictly requires all DraftDefenses to be active"
+
     draft_provider = LocalDraftProvider(
         model_gateway=None,
         custom_llm_fn=fake_local_model,
@@ -1081,6 +1091,16 @@ def run_live_whatsapp(
     alias_store = ContactAliasStore(conn)
     echo_registry = SelfEchoRegistry()
     gateway_store = GatewayStore(conn)
+
+    from src.gateway.local_draft_provider import DraftDefenses, LocalDraftProvider
+    sim_defenses = DraftDefenses()
+    assert (
+        sim_defenses.spotlighting
+        and sim_defenses.delimiter_gate
+        and sim_defenses.role_neutralisation
+        and sim_defenses.output_validation
+        and sim_defenses.injection_hint
+    ), "Simulation runtime strictly requires all DraftDefenses to be active"
 
     draft_provider = LocalDraftProvider(
         model_gateway=model_gateway,
