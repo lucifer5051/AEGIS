@@ -120,6 +120,8 @@ Commands are sent directly within the owner's WhatsApp self-chat:
 - `#list`: Lists all active pending drafts with IDs, contact labels, and expiration times.
 - `#approve <ID>` (or `#a <ID>`): Approves the draft, verifies tamper integrity (re-hashing against stored `text_sha256`), mints `SendAuthorization`, and dispatches.
 - `#edit <ID> <text>`: Overwrites draft text and re-delivers an updated card notice.
+- `#redo <ID> [instruction]`: Re-drafts a pending draft using the local model with optional owner instruction (prefix with `banter` or `normal` to override style for that redraft; max 5 redos per draft, 6 edit/redo operations per minute).
+- `#show <ID>`: Re-posts the current approval card for a draft.
 - `#reject <ID>` (or `#r <ID>`): Rejects and discards the pending draft.
 - `#contacts`: Displays the current whitelist and per-contact drafting styles.
 - `#mode <index_or_number> <normal|banter>`: Toggles drafting mode for a contact.
@@ -130,9 +132,14 @@ Commands are sent directly within the owner's WhatsApp self-chat:
 
 ## 5. Banter Style Guide & Safety Boundaries
 
-For contacts configured with `banter` mode, the local model drafts informal, witty responses reflecting familiarity. However, banter is automatically suppressed to neutral/safe tone under two strict guardrails:
+For contacts configured with `banter` mode, the local model drafts informal, witty responses reflecting familiarity.
 
-### 16 Protected Sensitive Topics
+### ContentGuards Switch (`whatsapp.content_guards`)
+Because the owner reviews and can edit every draft before `#approve`, optional wording policing (`ContentGuards`: `banned_terms` and `protected_topics`) is **disabled by default** (`whatsapp.content_guards: false`). When disabled, the banned-terms filter and automatic 16-topic banter suppression do not run. Setting `whatsapp.content_guards: true` in configuration restores both filters.
+
+Note: **Urgent-message triage** and **prompt-injection heuristics/defenses** (`DraftDefenses`) are separate from `ContentGuards` and remain strictly active at all times.
+
+### 16 Protected Sensitive Topics (when `whatsapp.content_guards: true`)
 If an incoming message or drafted reply touches any of the 16 protected categories, banter is suppressed (`banter_suppressed=True`), and a professional/safe neutral refusal or acknowledgment is drafted:
 1. `medical_and_health`: Chest pain, dosage, diagnosis, prescriptions, illness.
 2. `legal_and_law`: Contracts, lawsuits, litigation, lawyers, arrests.

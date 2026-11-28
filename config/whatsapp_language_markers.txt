@@ -1,0 +1,24 @@
+# WhatsApp Language Detection Markers
+# Canonical Reference: AEGIS Prompt 12 / Marathi Detection
+# Format: one marker per line. Comments start with #.
+# Requires at least 2 distinct hits for classification.
+
+# Devanagari script markers (Marathi)
+आहे
+नाही
+काय
+तुम्ही
+मला
+आणि
+
+# Roman script markers (Marathi Romanized)
+ahe
+nahi
+kay
+mhanje
+kasa
+kuthe
+tumhi
+mala
+ani
+

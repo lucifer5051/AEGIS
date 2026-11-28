@@ -20,6 +20,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -99,6 +100,8 @@ def format_approval_card(
     has_injection_warning: bool = False,
     banter_suppressed: bool = False,
     suppression_reason_code: Optional[str] = None,
+    redo_count: int = 0,
+    language_note: Optional[str] = None,
 ) -> str:
     """Render the standardized WhatsApp approval card posted to the owner's self-chat."""
     last2 = contact_jid.split("@")[0][-2:] if "@" in contact_jid else contact_jid[-2:]
@@ -106,6 +109,7 @@ def format_approval_card(
     sanitized_their = sanitize_card_text(their_text, 500)
     sanitized_draft = sanitize_card_text(draft_text, 500)
     tag = "  (placeholder)" if is_placeholder else ""
+    redo_tag = f" (redo {redo_count})" if redo_count > 0 else ""
     if banter_suppressed:
         banter_tag = " [banter suppressed: sensitive topic]"
     elif style_mode == "banter":
@@ -114,13 +118,19 @@ def format_approval_card(
         banter_tag = ""
     d_id = draft_id.upper()
     warning_line = "[WARNING] message looks like an instruction aimed at the assistant\n" if has_injection_warning else ""
+    note_line = (
+        "[NOTE] Marathi detected: this local model's Marathi is unreliable, read the draft carefully\n"
+        if language_note == "marathi"
+        else ""
+    )
     return (
-        f"[AEGIS] Draft #{d_id}{banter_tag}{tag}\n"
+        f"[AEGIS] Draft #{d_id}{redo_tag}{banter_tag}{tag}\n"
         f"{warning_line}"
+        f"{note_line}"
         f"From: {display_label} (...{last2})   mode: {style_mode}\n"
         f'They wrote: "{sanitized_their}"\n'
         f'Draft: "{sanitized_draft}"\n'
-        f"#approve {d_id} | #edit {d_id} <text> | #reject {d_id}   expires in {expires_in_hours}h"
+        f"#approve {d_id} | #edit {d_id} <text> | #reject {d_id} | #redo {d_id}   expires in {expires_in_hours}h"
     )
 
 
@@ -134,6 +144,7 @@ class DraftResult:
     suppression_reason_code: Optional[str] = None
     injection_flag: bool = False
     raw_text: Optional[str] = None
+    language_note: Optional[str] = None
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, str):
@@ -145,6 +156,7 @@ class DraftResult:
                 and self.banter_suppressed == other.banter_suppressed
                 and self.suppression_reason_code == other.suppression_reason_code
                 and self.injection_flag == other.injection_flag
+                and self.language_note == other.language_note
             )
         return False
 
@@ -172,7 +184,12 @@ class DraftContext:
 class DraftProvider(Protocol):
     """Protocol for generating draft replies."""
 
-    def draft(self, ctx: DraftContext) -> DraftResult:
+    def draft(
+        self,
+        ctx: DraftContext,
+        owner_instruction: Optional[str] = None,
+        force_mode: Optional[str] = None,
+    ) -> DraftResult:
         """Produce a proposed response given an isolated contact context."""
         ...
 
@@ -180,10 +197,16 @@ class DraftProvider(Protocol):
 class PlaceholderDraftProvider:
     """Deterministic placeholder draft provider used until local LLM drafting is integrated."""
 
-    def draft(self, ctx: DraftContext) -> DraftResult:
+    def draft(
+        self,
+        ctx: DraftContext,
+        owner_instruction: Optional[str] = None,
+        force_mode: Optional[str] = None,
+    ) -> DraftResult:
+        mode = force_mode if force_mode in ("normal", "banter") else ctx.style_mode
         return DraftResult(
             text="Thank you for your message. (placeholder)",
-            effective_mode=ctx.style_mode,
+            effective_mode=mode,
             banter_suppressed=False,
             suppression_reason_code=None,
             injection_flag=False,
@@ -218,6 +241,8 @@ class DraftManager:
         self._provider = draft_provider or PlaceholderDraftProvider()
         self._audit_writer = audit_writer
         self._lock = threading.Lock()
+        self._inbound_text_cache: Dict[str, str] = {}
+        self._edit_redo_timestamps: List[float] = []
 
     def _audit(
         self,
@@ -494,6 +519,12 @@ class DraftManager:
             from src.gateway.local_draft_provider import check_prompt_injection
             has_inj, _ = check_prompt_injection(inbound_text)
 
+        with self._lock:
+            if len(self._inbound_text_cache) > 200:
+                # Evict oldest entry
+                self._inbound_text_cache.pop(next(iter(self._inbound_text_cache)))
+            self._inbound_text_cache[draft_id] = inbound_text
+
         is_ph = isinstance(self._provider, PlaceholderDraftProvider) or "(placeholder)" in draft_text
         card = format_approval_card(
             draft_id=draft_id,
@@ -507,6 +538,7 @@ class DraftManager:
             has_injection_warning=has_inj,
             banter_suppressed=banter_suppressed,
             suppression_reason_code=suppression_reason_code,
+            language_note=draft_res.language_note,
         )
 
         last2 = canonical.split("@")[0][-2:]
@@ -533,6 +565,7 @@ class DraftManager:
             "label": label,
             "style_mode": effective_mode,
             "draft_text": draft_text,
+            "language_note": draft_res.language_note,
             "text_sha256": text_sha,
             "card": card,
             "expires_at": expires_at,
@@ -593,6 +626,16 @@ class DraftManager:
             "style_mode": row[13] or "normal",
         }
 
+    def _check_edit_redo_rate_limit(self) -> bool:
+        """Enforce global limit of 6 edit/redo operations per rolling 60-second window."""
+        now = time.time()
+        with self._lock:
+            self._edit_redo_timestamps = [t for t in self._edit_redo_timestamps if now - t < 60.0]
+            if len(self._edit_redo_timestamps) >= 6:
+                return False
+            self._edit_redo_timestamps.append(now)
+            return True
+
     def edit_draft(self, draft_id: str, new_text: str) -> Tuple[bool, Optional[str], Optional[str]]:
         """Edit a pending draft's plaintext and re-encrypt with the contact DEK.
 
@@ -608,6 +651,8 @@ class DraftManager:
                 f"Draft #{draft_id.upper()} cannot be edited (status is '{draft['status']}').",
                 None,
             )
+        if not self._check_edit_redo_rate_limit():
+            return False, "Rate limit exceeded: max 6 edit/redo operations per minute. Please wait.", None
 
         text_str = str(new_text or "").strip()
         if not text_str:
@@ -653,6 +698,177 @@ class DraftManager:
 
         self._audit("draft_edited", target_id=d_id.upper(), telemetry={"edit_count": draft["edit_count"] + 1})
         return True, None, card
+
+    def redo_draft(
+        self,
+        draft_id: str,
+        owner_instruction: Optional[str] = None,
+        force_mode: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        """Re-draft a pending draft in place using an optional trusted owner instruction.
+
+        Returns:
+            (success: bool, error_or_none: Optional[str], card_or_none: Optional[str])
+        """
+        draft = self.get_draft(draft_id)
+        if not draft:
+            return False, f"Draft #{draft_id.upper()} not found.", None
+        if draft["status"] != "pending":
+            return (
+                False,
+                f"Draft #{draft_id.upper()} cannot be redrafted (status is '{draft['status']}').",
+                None,
+            )
+
+        d_id = draft["draft_id"]
+        if draft["edit_count"] >= 5:
+            return False, f"Draft #{d_id.upper()} reached maximum redo limit (5).", None
+
+        if not self._check_edit_redo_rate_limit():
+            return False, "Rate limit exceeded: max 6 edit/redo operations per minute. Please wait.", None
+
+        clean_inst: Optional[str] = None
+        if owner_instruction:
+            cleaned = _BIDI_AND_ZERO_WIDTH_RE.sub("", owner_instruction)
+            cleaned = "".join(ch for ch in cleaned if unicodedata.category(ch)[0] != "C" or ch == " ").strip()
+            clean_inst = cleaned[:300] if cleaned else None
+
+        contact_jid = draft["contact_jid"]
+        style_mode = force_mode if force_mode in ("normal", "banter") else draft.get("style_mode", "normal")
+        with self._lock:
+            their_text = self._inbound_text_cache.get(d_id, "[inbound message]")
+
+        ctx = DraftContext(
+            contact_jid=contact_jid,
+            label=draft.get("label"),
+            style_mode=style_mode,
+            inbound_text=their_text,
+            recent_messages=[],
+        )
+
+        try:
+            try:
+                provider_res = self._provider.draft(
+                    ctx,
+                    owner_instruction=clean_inst,
+                    force_mode=force_mode,
+                )
+            except TypeError:
+                # Backward compatibility for providers that accept only (ctx)
+                provider_res = self._provider.draft(ctx)
+        except Exception as exc:
+            err_str = str(exc)
+            reason_code = "generation_failed"
+            if "timeout" in err_str.lower():
+                reason_code = "timeout"
+            elif "validation" in err_str.lower() or "rejected" in err_str.lower():
+                reason_code = "validation_rejected"
+            elif "policy" in err_str.lower():
+                reason_code = "policy_denied"
+            return False, f"Redo failed ({reason_code}). Existing draft retained.", None
+
+        if isinstance(provider_res, DraftResult):
+            draft_res = provider_res
+        elif isinstance(provider_res, str):
+            draft_res = DraftResult(text=provider_res, effective_mode=style_mode)
+        else:
+            draft_res = DraftResult(text=str(provider_res), effective_mode=style_mode)
+
+        new_text = str(draft_res.text or "").strip()
+        if not new_text or len(new_text) > 4000:
+            return False, "Redo failed (invalid_length). Existing draft retained.", None
+
+        _check_no_secrets(new_text)
+
+        dek = self._key_store.get_key(contact_jid)
+        if dek is None:
+            return False, "Could not retrieve key for contact.", None
+
+        aad = _build_draft_aad(contact_jid, d_id)
+        cipher = AES256GCMCipher(dek)
+        new_cipher, new_nonce = cipher.encrypt(new_text.encode("utf-8"), aad=aad)
+        new_hash = hashlib.sha256(new_text.encode("utf-8")).hexdigest()
+
+        with self._conn:
+            cur = self._conn.execute(
+                """
+                UPDATE whatsapp_drafts
+                SET draft_ciphertext = ?, draft_nonce = ?, text_sha256 = ?, edit_count = edit_count + 1
+                WHERE UPPER(draft_id) = UPPER(?) AND status = 'pending'
+                """,
+                (new_cipher, new_nonce, new_hash, d_id),
+            )
+            if cur.rowcount == 0:
+                return False, f"Draft #{d_id.upper()} was modified or decided concurrently.", None
+
+        new_edit_count = draft["edit_count"] + 1
+        is_ph = isinstance(self._provider, PlaceholderDraftProvider) or "(placeholder)" in new_text
+        card = format_approval_card(
+            draft_id=d_id,
+            label=draft.get("label"),
+            contact_jid=contact_jid,
+            style_mode=draft_res.effective_mode,
+            their_text=their_text,
+            draft_text=new_text,
+            is_placeholder=is_ph,
+            has_injection_warning=draft_res.injection_flag,
+            banter_suppressed=draft_res.banter_suppressed,
+            suppression_reason_code=draft_res.suppression_reason_code,
+            redo_count=new_edit_count,
+            language_note=draft_res.language_note,
+        )
+
+        # NEVER log or audit owner_instruction text; audit length and edit_count only
+        self._audit(
+            "draft_redo",
+            target_id=d_id.upper(),
+            telemetry={
+                "instruction_length": len(clean_inst or ""),
+                "edit_count": new_edit_count,
+            },
+        )
+        return True, None, card
+
+    def decrypt_draft(self, draft_id: str) -> Optional[str]:
+        """Decrypt a stored draft's text using the contact DEK and AAD."""
+        draft = self.get_draft(draft_id)
+        if not draft:
+            return None
+        d_id = draft["draft_id"]
+        dek = self._key_store.get_key(draft["contact_jid"])
+        if dek is None:
+            return None
+        try:
+            aad = _build_draft_aad(draft["contact_jid"], d_id)
+            cipher = AES256GCMCipher(dek)
+            plaintext = cipher.decrypt(draft["draft_ciphertext"], draft["draft_nonce"], aad=aad)
+            return plaintext.decode("utf-8")
+        except Exception:
+            return None
+
+    def show_draft_card(self, draft_id: str) -> Tuple[bool, str]:
+        """Re-render the current approval card for a draft."""
+        draft = self.get_draft(draft_id)
+        if not draft:
+            return False, f"Draft #{draft_id.upper()} not found."
+        d_id = draft["draft_id"]
+        plaintext = self.decrypt_draft(d_id)
+        if plaintext is None:
+            return False, f"Could not decrypt draft #{d_id.upper()}."
+        with self._lock:
+            their_text = self._inbound_text_cache.get(d_id, "[inbound message]")
+        is_ph = "(placeholder)" in plaintext
+        card = format_approval_card(
+            draft_id=d_id,
+            label=draft.get("label"),
+            contact_jid=draft["contact_jid"],
+            style_mode=draft.get("style_mode", "normal"),
+            their_text=their_text,
+            draft_text=plaintext,
+            is_placeholder=is_ph,
+            redo_count=draft.get("edit_count", 0),
+        )
+        return True, card
 
     def reject_draft(self, draft_id: str) -> Tuple[bool, str]:
         """Atomically transition a draft from pending to rejected."""
