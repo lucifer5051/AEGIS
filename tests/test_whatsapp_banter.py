@@ -12,6 +12,7 @@ import pytest
 
 from src.gateway.drafts import DraftContext, DraftManager, format_approval_card
 from src.gateway.local_draft_provider import (
+    ContentGuards,
     DraftGenerationError,
     LocalDraftProvider,
     contains_banned_terms,
@@ -123,7 +124,10 @@ def test_3_2_inbound_sensitive_topic_demotes_banter_to_normal():
         captured_sys.append(s)
         return "I am so sorry to hear that. Please take care."
 
-    provider = LocalDraftProvider(custom_llm_fn=mock_llm)
+    provider = LocalDraftProvider(
+        custom_llm_fn=mock_llm,
+        content_guards=ContentGuards(banned_terms=True, protected_topics=True),
+    )
     ctx = DraftContext(
         contact_jid=CANONICAL_PN,
         label="Bob",
@@ -174,7 +178,10 @@ def test_3_2_draft_with_banned_term_regenerates_in_normal_mode():
             return "Haha you idiot, you totally failed."
         return "Haha nice try, better luck next time."
 
-    provider = LocalDraftProvider(custom_llm_fn=mock_llm)
+    provider = LocalDraftProvider(
+        custom_llm_fn=mock_llm,
+        content_guards=ContentGuards(banned_terms=True, protected_topics=True),
+    )
     ctx = DraftContext(
         contact_jid=CANONICAL_PN,
         label="Bob",

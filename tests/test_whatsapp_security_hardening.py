@@ -31,6 +31,7 @@ from src.gateway.drafts import (
 from src.gateway.echo_registry import SelfEchoRegistry
 from src.gateway.gateway import ChannelGateway
 from src.gateway.local_draft_provider import (
+    ContentGuards,
     DraftGenerationError,
     LocalDraftProvider,
     contains_banned_terms,
@@ -248,7 +249,10 @@ def test_1_2_screening_scope_inbound_history_and_draft():
         captured_modes.append("banter" if "BANTER STYLE RULES" in s else "normal")
         return "Hey there! Long time no see."
 
-    provider = LocalDraftProvider(custom_llm_fn=mock_llm)
+    provider = LocalDraftProvider(
+        custom_llm_fn=mock_llm,
+        content_guards=ContentGuards(banned_terms=True, protected_topics=True),
+    )
 
     # 1. Inbound hit demotes to normal
     ctx1 = DraftContext(
@@ -286,7 +290,10 @@ def test_1_2_screening_scope_inbound_history_and_draft():
             return "Haha you look so fat and ugly today!"  # Touches body_and_appearance
         return "Haha nice one, let's catch up soon."
 
-    provider3 = LocalDraftProvider(custom_llm_fn=mock_llm_sensitive_banter)
+    provider3 = LocalDraftProvider(
+        custom_llm_fn=mock_llm_sensitive_banter,
+        content_guards=ContentGuards(banned_terms=True, protected_topics=True),
+    )
     ctx3 = DraftContext(
         contact_jid=CANONICAL_PN,
         label="Alice",

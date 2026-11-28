@@ -613,6 +613,6 @@ def test_smoke_test_cli_fake_passes(capsys):
 
     captured = capsys.readouterr()
     assert "SAGE WhatsApp Drafting Pipeline Smoke Test (mode: FAKE)" in captured.out
-    assert "Summary: Total: 12, Passed: 12, Failed: 0" in captured.out
-    assert "[12]" in captured.out
+    assert "Summary: Total: 17, Passed: 17, Failed: 0" in captured.out
+    assert "[17]" in captured.out
     assert "urgent_message_no_draft" in captured.out

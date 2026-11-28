@@ -271,6 +271,10 @@ def run_whatsapp_eval(
             model_gateway = custom_model_gateway
         else:
             model_gateway = build_local_model_gateway(model_name=model_name, ollama_host=ollama_host, timeout_seconds=30.0)
+        if custom_model_gateway is None and model_gateway is not None:
+            from src.gateway.whatsapp_runtime import warm_local_model
+            warm_local_model(model_gateway, model_name, timeout_seconds=120.0)
+            t_eval_start = time.perf_counter()
 
     results_by_cond: Dict[str, Any] = {}
 

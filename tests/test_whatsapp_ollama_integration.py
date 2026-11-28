@@ -415,10 +415,10 @@ def test_smoke_test_end_to_end_real_adapter_with_stub(ollama_stub):
 
     # Verify that the stub received requests at /api/chat with thinking disabled
     chat_requests = [r for r in ollama_stub["handler"].received_requests if r["path"] == "/api/chat"]
-    assert len(chat_requests) > 0
-    first_req = chat_requests[0]["payload"]
+    assert len(chat_requests) >= 2
+    first_req = chat_requests[1]["payload"]
     assert first_req.get("think") is False
-    assert first_req.get("keep_alive") == "10m"
+    assert first_req.get("keep_alive") == "60m"
     assert first_req.get("options", {}).get("num_predict") == 160
     assert first_req.get("options", {}).get("num_ctx") == 4096
 

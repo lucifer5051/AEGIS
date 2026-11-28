@@ -7,9 +7,15 @@ Canonical Reference:
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 from typing import Any, Callable, Collection, Optional, Protocol
 
 logger = logging.getLogger(__name__)
+
+_BIDI_AND_ZERO_WIDTH_RE = re.compile(
+    r"[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF\u061C]"
+)
 
 
 class OwnerChannelHandler(Protocol):
@@ -134,6 +140,43 @@ class OwnerCommandHandler:
                 else:
                     reply = f"[AEGIS] Draft #{draft_id} updated:\n{card}"
 
+        elif cmd_name == "redo":
+            tokens = text_str.split(maxsplit=2)
+            if len(tokens) < 2:
+                reply = "[AEGIS] Usage: #redo <ID> [instruction]"
+            else:
+                draft_id = tokens[1].strip().upper()
+                raw_inst = tokens[2].strip() if len(tokens) >= 3 else ""
+                force_mode: Optional[str] = None
+                clean_inst = raw_inst
+                if raw_inst:
+                    inst_parts = raw_inst.split(maxsplit=1)
+                    first_word = inst_parts[0].lower()
+                    if first_word in ("banter", "normal"):
+                        force_mode = first_word
+                        clean_inst = inst_parts[1].strip() if len(inst_parts) > 1 else ""
+                clean_inst = _BIDI_AND_ZERO_WIDTH_RE.sub("", clean_inst)
+                clean_inst = "".join(
+                    ch for ch in clean_inst if unicodedata.category(ch)[0] != "C" or ch == " "
+                ).strip()[:300]
+                success, err, card = self._draft_manager.redo_draft(
+                    draft_id=draft_id,
+                    owner_instruction=clean_inst if clean_inst else None,
+                    force_mode=force_mode,
+                )
+                if not success:
+                    reply = f"[AEGIS] {err}"
+                else:
+                    reply = f"[AEGIS] Draft #{draft_id} redrafted:\n{card}"
+
+        elif cmd_name == "show":
+            if len(parts) < 2:
+                reply = "[AEGIS] Usage: #show <ID>"
+            else:
+                draft_id = parts[1].strip().upper()
+                success, err_or_card = self._draft_manager.show_draft_card(draft_id)
+                reply = err_or_card if success else f"[AEGIS] {err_or_card}"
+
         elif cmd_name in ("reject", "r"):
             if len(parts) < 2:
                 reply = "[AEGIS] Usage: #reject <ID> (or #r <ID>)"
@@ -229,6 +272,8 @@ class OwnerCommandHandler:
                 "[AEGIS WhatsApp Commands]\n"
                 "#approve <ID> (or #a) - Approve & send draft\n"
                 "#edit <ID> <text> - Edit draft text\n"
+                "#redo <ID> [instruction] - Re-draft with optional instruction\n"
+                "#show <ID> - Re-post current draft card\n"
                 "#reject <ID> (or #r) - Reject draft\n"
                 "#list - View pending drafts\n"
                 "#contacts - View whitelisted contacts\n"
